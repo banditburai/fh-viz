@@ -1,0 +1,4 @@
+tailwindcss
+__pycache__
+*.pyc
+llms_ctx.txt

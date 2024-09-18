@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    overscroll-behavior: none;
+    overflow-x: hidden;
+    touch-action: pan-y;                            
+}
+
+@layer components {
+    .radio-group {
+        @apply flex flex-wrap gap-4 mt-2;
+    }
+    .radio-item {
+        @apply flex items-center cursor-pointer;
+    }
+    
+}
+.radio-circle {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #4A5568;
+    border-radius: 50%;
+    margin-right: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.radio-circle::after {
+    content: '';
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: #4A5568;
+    display: none;
+}
+.radio-input:checked + .radio-circle::after {
+    display: block;
+}
+.radio-input {
+    position: absolute;
+    opacity: 0;
+}
+.explainer {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: #EDF2F7;
+    border-radius: 0.5rem;
+    display: none;
+}
+
+.control-btn {
+    font-size: 24px;
+    padding: 8px 16px;
+    background-color: #4a5568;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+
+.control-btn:hover {
+    background-color: #2d3748;
+}
+
+#results {
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+#results svg {
+    max-width: 100%;
+    height: auto;
+}
