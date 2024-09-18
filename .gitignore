@@ -2,3 +2,5 @@ tailwindcss
 __pycache__
 *.pyc
 llms_ctx.txt
+.sesskey
+.DS_Store
