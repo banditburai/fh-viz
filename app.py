@@ -565,118 +565,68 @@ class Visualizer:
 visualizer = Visualizer()
 
 animation_script = """
+function updateEdgePositions() {
+    const svg = document.querySelector('#graph-viz svg');
+    if (!svg) return;
+
+    const lines = svg.querySelectorAll('line');
+    lines.forEach(line => {
+        const fromNode = svg.querySelector(`#${line.getAttribute('data-from')}`);
+        const toNode = svg.querySelector(`#${line.getAttribute('data-to')}`);
+        if (fromNode && toNode) {
+            const fromTransform = fromNode.getAttribute('transform');
+            const toTransform = toNode.getAttribute('transform');
+            const [fromX, fromY] = fromTransform.match(/\d+/g);
+            const [toX, toY] = toTransform.match(/\d+/g);
+            
+            line.setAttribute('x1', fromX);
+            line.setAttribute('y1', fromY);
+            line.setAttribute('x2', toX);
+            line.setAttribute('y2', toY);
+        }
+    });
+}
+
 let isPlaying = false;
-let animationId = null;
+let animationFrame;
 
-function updateVisualization(data) {
-    // Update progress tracker
-    document.querySelector('#progress-tracker text:nth-child(2)').textContent = `Step ${data.step_count}/100`;
-    document.querySelector('#progress-tracker text:nth-child(3)').textContent = `Train loss: ${data.train_loss.toFixed(6)}`;
-    document.querySelector('#progress-tracker text:nth-child(4)').textContent = `Validation loss: ${data.val_loss ? data.val_loss.toFixed(6) : 'N/A'}`;
-
-    // Update graph visualization
-    updateGraph(data.graph_data);
+function playTraining() {
+    if (!isPlaying) return;
+    
+    // Trigger the train step
+    document.getElementById('step-btn').click();
+    
+    // Schedule the next frame
+    animationFrame = requestAnimationFrame(playTraining);
 }
 
-function updateGraph(graphData) {
-    // Update the SVG based on the graph data
-    // This function will depend on how you want to visualize your graph
-    // You might use a library like D3.js for more complex visualizations
-}
+// Wrap all the code that interacts with DOM elements
+document.addEventListener('DOMContentLoaded', function() {
+    const stepBtn = document.getElementById('step-btn');
+    const playBtn = document.getElementById('play-btn');
 
-async function trainStep() {
-    const response = await fetch('/train_step', { method: 'POST' });
-    const data = await response.json();
-    updateVisualization(data);
-
-    if (isPlaying) {
-        animationId = requestAnimationFrame(trainStep);
+    if (playBtn) {
+        playBtn.addEventListener('click', function() {
+            isPlaying = !isPlaying;
+            this.textContent = isPlaying ? 'Pause' : 'Play';
+            
+            if (isPlaying) {
+                playTraining();
+            } else {
+                cancelAnimationFrame(animationFrame);
+            }
+        });
     }
-}
 
-async function togglePlay() {
-    const response = await fetch('/toggle_play', { method: 'POST' });
-    const data = await response.json();
-    isPlaying = data.is_playing;
-
-    const playPauseBtn = document.getElementById('play-pause-btn');
-    playPauseBtn.textContent = isPlaying ? 'Pause' : 'Play';
-    playPauseBtn.classList.toggle('bg-red-500', isPlaying);
-    playPauseBtn.classList.toggle('bg-green-500', !isPlaying);
-
-    updateVisualization(data);
-
-    if (isPlaying) {
-        trainStep();
-    } else {
-        cancelAnimationFrame(animationId);
-    }
-}
-
-document.getElementById('play-pause-btn').addEventListener('click', togglePlay);
-document.getElementById('step-btn').addEventListener('click', trainStep);
+    // Run updateEdgePositions after HTMX swaps content
+    document.body.addEventListener('htmx:afterSwap', function(event) {
+        if (event.detail.target.id === 'graph-viz') {
+            updateEdgePositions();
+        }
+    });
+});
 """
 
-update_script = """
-function updateGraph(graphData) {
-    // Clear existing graph
-    const svg = document.querySelector('#training-viz svg');
-    svg.innerHTML = '';
-
-    // Create nodes
-    graphData.nodes.forEach(node => {
-        const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        g.setAttribute('id', `node-${node.id}`);
-
-        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        circle.setAttribute('r', '20');
-        circle.setAttribute('fill', 'white');
-        circle.setAttribute('stroke', 'black');
-
-        const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        text.textContent = node.label;
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('dominant-baseline', 'middle');
-
-        g.appendChild(circle);
-        g.appendChild(text);
-        svg.appendChild(g);
-    });
-
-    // Create edges
-    graphData.edges.forEach(edge => {
-        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        line.setAttribute('stroke', 'black');
-        line.setAttribute('marker-end', 'url(#arrowhead)');
-        svg.appendChild(line);
-    });
-
-    // Position nodes and edges (you might want to use a force-directed layout algorithm for better positioning)
-    // This is a simple positioning for demonstration
-    const nodeElements = svg.querySelectorAll('g');
-    nodeElements.forEach((el, index) => {
-        const x = (index % 5) * 100 + 50;
-        const y = Math.floor(index / 5) * 100 + 50;
-        el.setAttribute('transform', `translate(${x}, ${y})`);
-    });
-
-    // Update edge positions
-    const lineElements = svg.querySelectorAll('line');
-    graphData.edges.forEach((edge, index) => {
-        const fromNode = document.querySelector(`#node-${edge.from}`);
-        const toNode = document.querySelector(`#node-${edge.to}`);
-        const fromTransform = fromNode.getAttribute('transform');
-        const toTransform = toNode.getAttribute('transform');
-        const [fromX, fromY] = fromTransform.match(/\d+/g);
-        const [toX, toY] = toTransform.match(/\d+/g);
-        
-        lineElements[index].setAttribute('x1', fromX);
-        lineElements[index].setAttribute('y1', fromY);
-        lineElements[index].setAttribute('x2', toX);
-        lineElements[index].setAttribute('y2', toY);
-    });
-}
-"""
 
 @rt('/')
 def get():
@@ -709,8 +659,8 @@ def get():
                 Div(
                     H3("Training Progress", cls="text-lg font-bold mb-2"),
                     control_buttons(),
-                    Div(id="progress-tracker"),
-                    Div(id="training-viz", cls="h-[200px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-4 mb-4"),
+                    Div(id="training-content",
+                        cls="bg-white border-2 border-gray-300 rounded-lg shadow-lg p-4 mb-4 w-full flex flex-col items-stretch"),
                     id="training-section",
                     cls="mb-8"
                 ),
@@ -731,15 +681,15 @@ def get():
 
 def control_buttons(is_playing=False):
     return Div(
-        Button("Reset", id="reset-btn", hx_post="/reset", hx_target="#results", hx_swap="innerHTML",
+        Button("Reset", id="reset-btn", hx_post="/reset", hx_target="#training-content", hx_swap="innerHTML",
                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Reset"),
          Button("Pause" if is_playing else "Play", id="play-pause-btn", hx_post="/toggle_play", 
-               hx_target="#training-progress",
-               hx_swap="outerHTML",
+               hx_target="#training-content",
+               hx_swap="innerHTML",
                cls=f"bg-{'red' if is_playing else 'green'}-500 hover:bg-{'red' if is_playing else 'green'}-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Play/Pause"),
-        Button("Train Step", id="step-btn", hx_post="/train_step", hx_target="#training-viz", hx_swap="outerHTML", 
+        Button("Train Step", id="step-btn", hx_post="/train_step", hx_target="#training-content", hx_swap="innerHTML", 
                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105", 
                title="Train Step"),
         cls="flex justify-center space-x-4 mb-4"
@@ -916,14 +866,74 @@ async def post():
 
 @rt('/train_step')
 async def post():
-    visualizer.train_step()
-    return {
-        "step_count": visualizer.step_count,
-        "train_loss": visualizer.get_latest_losses()[0],
-        "val_loss": visualizer.get_latest_losses()[1],
-        "graph_data": visualizer.get_graph_data()
-    }
+    try:
+        loss = visualizer.train_step()
+        train_loss, val_loss = visualizer.get_latest_losses()
+        
+        train_loss_str = f"{train_loss:.6f}" if train_loss is not None else "---"
+        val_loss_str = f"{val_loss:.6f}" if val_loss is not None else "---"
+        
+        return Div(
+            progress_tracker(visualizer.step_count, train_loss_str, val_loss_str),
+            Div(
+                id="computation-graph",
+                hx_get="/get_graph",
+                hx_trigger="load",
+                cls="h-[200px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-4 mb-4 w-full"
+            ),
+            Div(
+                id="dataset-visualization",
+                hx_get="/get_dataset_viz",
+                hx_trigger="load",
+                cls="h-[200px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-4 w-full"
+            ),
+            id="training-content",
+            cls="w-full"
+        )
+    except Exception as e:
+        print(f"Error in train_step: {str(e)}")  # For debugging
+        return Div(f"An error occurred: {str(e)}", cls="text-red-500 w-full")
+    
+def create_graph_svg(graph_data):
+    svg_content = []
+    
+    # Create nodes
+    for index, node in enumerate(graph_data['nodes']):
+        x = 50 + (index % 5) * 100
+        y = 50 + (index // 5) * 100
+        
+        g = G(
+            Circle(r=20, fill='white', stroke='black'),
+            Text(node['value'].toFixed(4), 
+                 text_anchor='middle', 
+                 dominant_baseline='middle'),
+            id=f"node-{node['id']}",
+            transform=f"translate({x}, {y})"
+        )
+        svg_content.append(g)
+    
+    # Create edges
+    for edge in graph_data['edges']:
+        from_node = f"#node-{edge['from']}"
+        to_node = f"#node-{edge['to']}"
+        line = Line(x1=0, y1=0, x2=0, y2=0,  # These will be set by JavaScript
+                    stroke='black',
+                    marker_end='url(#arrowhead)')
+        svg_content.append(line)
+    
+    return Svg(*svg_content, 
+               width="100%", height="100%", viewBox="0 0 600 400")
 
+
+@rt('/get_graph')
+async def get():
+    graph_data = visualizer.get_graph_data()
+    return create_graph_svg(graph_data)
+
+@rt('/get_dataset_viz')
+async def get():
+    # This would return your dataset visualization
+    return Div("Dataset visualization placeholder")
 
 def progress_tracker(step_count, train_loss, val_loss):
     return Div(
@@ -945,17 +955,15 @@ async def post():
     visualizer.reset()
     visualizer.initialize_model()
     return Div(
-        Div(
-            progress_tracker(0, "---", "---"),
-            id="progress-tracker",            
-        ),
+        progress_tracker(0, "---", "---"),
         Div(
             P("Training progress reset. Click 'Train Step' or 'Play' to start training.", 
               cls="text-gray-600"),
             id="training-viz",
             cls="w-full h-[450px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-8"
         ),
-        id="results"
+        id="training-content",
+        cls="w-full"
     )
 
 
