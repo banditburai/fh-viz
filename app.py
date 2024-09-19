@@ -4,7 +4,8 @@ import math
 from fasthtml.common import *
 from fasthtml.svg import *
 from graphviz import Digraph
-import json
+from pydantic import BaseModel
+from typing import List, Dict, Any
 
 tailwindLink = Link(rel="stylesheet", href="assets/output.css", type="text/css")
 app, rt = fast_app(
@@ -380,20 +381,62 @@ class Visualizer:
         self.step_count = 0
         self.train_losses = []
         self.val_losses = []
+        self.current_batch = []
+        self.batch_size = 20
         self.is_playing = False
         self.optimizer = None
+        self.progress_tracker = {
+            'step_count': 0,
+            'train_loss': "---",
+            'val_loss': "---"
+        }
 
-    def reset(self):        
-        self.model = None
-        self.optimizer = None
+    def initialize_model(self):
+        self.model = MLP(2, [8, 3])
+        self.optimizer = AdamW(self.model.parameters(), lr=1e-1, weight_decay=1e-4)
+
+
+    def reset(self):
+        if self.model is None:
+            self.initialize_model()
+        
+        # Reset training progress
         self.step_count = 0
         self.train_losses = []
         self.val_losses = []
-        self.is_playing = False
-        self.train_split = None
-        self.val_split = None
-        self.test_split = None
+        
+        # Reset model parameters to initial values
+        for p in self.model.parameters():
+            p.data = random.uniform(-0.1, 0.1)
+        
+        # Reset optimizer
+        self.optimizer = AdamW(self.model.parameters(), lr=1e-1, weight_decay=1e-4)
 
+
+    def get_state(self):
+        return {
+            'progress_tracker': self.progress_tracker,
+            'graph_data': self.get_graph_data()
+        }
+    
+    async def get_next_batch(self, start):
+        batch = []
+        for i in range(self.batch_size):
+            step = start + i
+            if step >= 100:  # Assuming 100 is the total number of steps
+                break
+            # Generate data for this step
+            train_loss = self.train_step()
+            val_loss = self.val_loss()  # Assuming you have a method to calculate validation loss
+            graph_data = self.get_graph_data()
+            batch.append({
+                'step': step,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'graph_data': graph_data
+            })
+        return batch
+    
     def get_model_state(self):
         return {
             "parameters": [
@@ -418,14 +461,14 @@ class Visualizer:
     def get_validation_data(self):
         return [{"x": x, "y": y} for x, y in self.val_split]
     
-    def generate_dataset(self, n=100):
-        self.reset()
+    def generate_dataset(self, n=100):        
         self.train_split, self.val_split, self.test_split = gen_data_yinyang(random, n=n)
-        self.initialize_model()
-
-    def initialize_model(self):
-        self.model = MLP(2, [8, 3])
-        self.optimizer = AdamW(self.model.parameters(), lr=1e-1, weight_decay=1e-4)
+        # Initialize the model if it doesn't exist
+        if self.model is None:
+            self.initialize_model()
+        
+        # Now reset the training progress
+        self.reset()
 
     def loss_fun(self, split):
         total_loss = Value(0.0)
@@ -440,26 +483,31 @@ class Visualizer:
         self.is_playing = not self.is_playing
         return self.is_playing
     
-    def train_step(self):        
-        if not hasattr(self, 'train_split') or self.train_split is None or not self.model:
-            self.generate_dataset()
-
-        # forward pass
+    def train_step(self):
+        if not self.model or not self.train_split:
+            raise ValueError("Model or training data not initialized")
+        
+        # Perform one training step
         loss = self.loss_fun(self.train_split)
-        # backward pass
         loss.backward()
-        # update model parameters
         self.optimizer.step()
         self.optimizer.zero_grad()
 
         self.step_count += 1
         self.train_losses.append(loss.data)
 
-        # evaluate validation loss every 10 steps
-        if self.step_count % 10 == 0:
+        # Evaluate validation loss every 10 steps
+        if self.step_count % 10 == 0 and self.val_split:
             val_loss = self.loss_fun(self.val_split)
             self.val_losses.append(val_loss.data)
-
+        
+        # Update progress tracker
+        self.progress_tracker = {
+            'step_count': self.step_count,
+            'train_loss': f"{self.train_losses[-1]:.6f}" if self.train_losses else "---",
+            'val_loss': f"{self.val_losses[-1]:.6f}" if self.val_losses else "---"
+        }
+        
         return loss.data
 
     def get_latest_losses(self):
@@ -487,9 +535,6 @@ class Visualizer:
         return {'x': point[0][0], 'y': point[0][1], 'class': point[1]}
 
     def get_graph_data(self):
-        def get_node_id(node):
-            return id(node)
-
         nodes = []
         edges = []
         visited = set()
@@ -500,17 +545,16 @@ class Visualizer:
             visited.add(node)
 
             nodes.append({
-                "id": get_node_id(node),
+                "id": id(node),
                 "value": node.data,
-                "grad": node.grad,
-                "label": node.label if hasattr(node, 'label') else str(node.data)
+                "grad": node.grad
             })
 
             for child in node._prev:
                 edges.append({
-                    "from": get_node_id(child),
-                    "to": get_node_id(node),
-                    "op": node._op if hasattr(node, '_op') else ''
+                    "from": id(child),
+                    "to": id(node),
+                    "grad": node.grad if hasattr(node, '_backward') else None
                 })
                 traverse(child)
 
@@ -564,69 +608,93 @@ class Visualizer:
 
 visualizer = Visualizer()
 
-animation_script = """
-function updateEdgePositions() {
-    const svg = document.querySelector('#graph-viz svg');
-    if (!svg) return;
-
-    const lines = svg.querySelectorAll('line');
-    lines.forEach(line => {
-        const fromNode = svg.querySelector(`#${line.getAttribute('data-from')}`);
-        const toNode = svg.querySelector(`#${line.getAttribute('data-to')}`);
-        if (fromNode && toNode) {
-            const fromTransform = fromNode.getAttribute('transform');
-            const toTransform = toNode.getAttribute('transform');
-            const [fromX, fromY] = fromTransform.match(/\d+/g);
-            const [toX, toY] = toTransform.match(/\d+/g);
-            
-            line.setAttribute('x1', fromX);
-            line.setAttribute('y1', fromY);
-            line.setAttribute('x2', toX);
-            line.setAttribute('y2', toY);
-        }
-    });
-}
-
+animation_script="""
+let currentStep = 0;
+let currentBatch = [];
+let nextBatch = [];
 let isPlaying = false;
-let animationFrame;
+let batchSize = 20;
 
-function playTraining() {
-    if (!isPlaying) return;
-    
-    // Trigger the train step
-    document.getElementById('step-btn').click();
-    
-    // Schedule the next frame
-    animationFrame = requestAnimationFrame(playTraining);
+async function fetchBatch(start) {
+    const response = await fetch(`/play?start=${start}&size=${batchSize}`);
+    return await response.json();
 }
 
-// Wrap all the code that interacts with DOM elements
-document.addEventListener('DOMContentLoaded', function() {
-    const stepBtn = document.getElementById('step-btn');
-    const playBtn = document.getElementById('play-btn');
+async function preloadNextBatch() {
+    nextBatch = await fetchBatch(currentStep + batchSize);
+}
 
-    if (playBtn) {
-        playBtn.addEventListener('click', function() {
-            isPlaying = !isPlaying;
-            this.textContent = isPlaying ? 'Pause' : 'Play';
-            
-            if (isPlaying) {
-                playTraining();
-            } else {
-                cancelAnimationFrame(animationFrame);
-            }
-        });
+async function handlePlay() {
+    if (!isPlaying) {
+        isPlaying = true;
+        if (currentBatch.length === 0) {
+            currentBatch = await fetchBatch(currentStep);
+            preloadNextBatch();
+        }
+        requestAnimationFrame(playAnimation);
+    }
+}
+
+function handlePause() {
+    isPlaying = false;
+}
+
+async function playAnimation(timestamp) {
+    if (!isPlaying) return;
+
+    if (currentStep % batchSize === batchSize - 5) {
+        // Start preloading when 5 steps away from needing the next batch
+        preloadNextBatch();
     }
 
-    // Run updateEdgePositions after HTMX swaps content
-    document.body.addEventListener('htmx:afterSwap', function(event) {
-        if (event.detail.target.id === 'graph-viz') {
-            updateEdgePositions();
-        }
-    });
-});
-"""
+    if (currentStep % batchSize === 0 && currentStep > 0) {
+        currentBatch = nextBatch;
+        nextBatch = [];
+    }
 
+    const stepData = currentBatch[currentStep % batchSize];
+    if (!stepData) {
+        isPlaying = false;
+        return;
+    }
+
+    updateVisualization(stepData);
+    currentStep++;
+
+    if (currentStep < 100) {  // Assuming 100 is the total number of steps
+        requestAnimationFrame(playAnimation);
+    }
+}
+
+function updateVisualization(stepData) {
+    // Update the progress tracker and graph visualization
+    document.getElementById('training-content').innerHTML = htmx.ajax('GET', `/step?step=${stepData.step}&train_loss=${stepData.train_loss}&val_loss=${stepData.val_loss}`).responseText;
+    updateGraph(stepData.graph_data);
+}
+
+function updateGraphVisualization(graphData) {
+    // Update node values and gradients
+    for (const node of graphData.nodes) {
+        const nodeElement = document.querySelector(`#node-${node.id}`);
+        if (nodeElement) {
+            nodeElement.querySelector('.value').textContent = node.value.toFixed(4);
+            nodeElement.querySelector('.grad').textContent = node.grad.toFixed(4);
+        }
+    }
+
+    // Update edge gradients
+    for (const edge of graphData.edges) {
+        const edgeElement = document.querySelector(`#edge-${edge.from}-${edge.to}`);
+        if (edgeElement && edge.grad !== null) {
+            const gradientStrength = Math.abs(edge.grad);
+            edgeElement.style.strokeWidth = `${1 + gradientStrength * 5}px`;
+            edgeElement.style.stroke = edge.grad > 0 ? 'blue' : 'red';
+        }
+    }
+}
+
+
+"""
 
 @rt('/')
 def get():
@@ -658,8 +726,10 @@ def get():
                 # Training Progress Section
                 Div(
                     H3("Training Progress", cls="text-lg font-bold mb-2"),
-                    control_buttons(),
-                    Div(id="training-content",
+                    control_buttons(),                    
+                    Div(
+                        progress_tracker(0, "---", "---"),    
+                        id="training-content",
                         cls="bg-white border-2 border-gray-300 rounded-lg shadow-lg p-4 mb-4 w-full flex flex-col items-stretch"),
                     id="training-section",
                     cls="mb-8"
@@ -684,12 +754,10 @@ def control_buttons(is_playing=False):
         Button("Reset", id="reset-btn", hx_post="/reset", hx_target="#training-content", hx_swap="innerHTML",
                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Reset"),
-         Button("Pause" if is_playing else "Play", id="play-pause-btn", hx_post="/toggle_play", 
-               hx_target="#training-content",
-               hx_swap="innerHTML",
-               cls=f"bg-{'red' if is_playing else 'green'}-500 hover:bg-{'red' if is_playing else 'green'}-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
+        Button("Play", id="play-pause-btn", hx_post="/play",
+               cls="bg-green-500 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Play/Pause"),
-        Button("Train Step", id="step-btn", hx_post="/train_step", hx_target="#training-content", hx_swap="innerHTML", 
+        Button("Train Step", id="step-btn", hx_post="/train_step", hx_target="#training-content", hx_swap="innerHTML", hx_trigger="click",
                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105", 
                title="Train Step"),
         cls="flex justify-center space-x-4 mb-4"
@@ -756,7 +824,7 @@ def filter_buttons():
 async def post(data_filter: str):
     all_data = visualizer.get_all_data()
     filtered_data = [d for d, set_type in all_data if data_filter == 'all' or set_type == data_filter]
-    svg_content = create_svg_content(filtered_data)
+    svg_content = create_dataset_svg(filtered_data)
     
     return (
         Svg(*svg_content, 
@@ -769,7 +837,7 @@ async def post(data_filter: str):
         """)
     )
 
-def create_svg_content(data):
+def create_dataset_svg(data):
     def create_point(point, set_type):
         x = (point['x'] + 2) * 40 + 25  # Scale and shift x coordinate
         y = 225 - (point['y'] + 2) * 40  # Scale, shift, and invert y coordinate
@@ -789,6 +857,29 @@ def create_svg_content(data):
     ]
 
     return svg_content
+
+class StepData(BaseModel):
+    step_count: int
+    train_loss: str
+    val_loss: str
+    graph_data: Dict[str, Any]
+
+
+@rt('/get_step_batch')
+async def get(size: int = 20):
+    batch = []
+    for _ in range(size):
+        loss = visualizer.train_step()
+        batch.append({
+            'progress_tracker': {
+                'step_count': visualizer.step_count,
+                'train_loss': f"{visualizer.train_losses[-1]:.6f}" if visualizer.train_losses else "---",
+                'val_loss': f"{visualizer.val_losses[-1]:.6f}" if visualizer.val_losses else "---"
+            },
+            'graph_data': visualizer.get_graph_data()
+        })
+    return batch
+
 
 @rt('/generate_dataset')
 async def post():
@@ -840,60 +931,20 @@ async def post():
         cls="w-full"
     )
 
-# @rt('/train_step')
-# async def post():
-#     continued = visualizer.train_step()
-#     if not continued:
-#         return "Training complete"    
-#     graph_svg = visualizer.get_graph_visualization()
-
-#     train_loss, val_loss = visualizer.get_latest_losses()
-    
-#     return Div(        
-#         graph_svg,
-#         id="training-viz",
-#         cls="w-full h-[500px] bg-white border-2 border-gray-300 rounded-lg shadow-lg overflow-hidden p-8"
-#     ), Div(
-#         progress_tracker(
-#             visualizer.step_count,
-#             f"{train_loss:.6f}" if train_loss is not None else "---",
-#             f"{val_loss:.6f}" if val_loss is not None else "N/A"
-#         ),
-#         id="progress-tracker",
-#         hx_swap_oob="true"
-#     )
-
-
 @rt('/train_step')
 async def post():
     try:
-        loss = visualizer.train_step()
-        train_loss, val_loss = visualizer.get_latest_losses()
-        
-        train_loss_str = f"{train_loss:.6f}" if train_loss is not None else "---"
-        val_loss_str = f"{val_loss:.6f}" if val_loss is not None else "---"
-        
-        return Div(
-            progress_tracker(visualizer.step_count, train_loss_str, val_loss_str),
-            Div(
-                id="computation-graph",
-                hx_get="/get_graph",
-                hx_trigger="load",
-                cls="h-[200px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-4 mb-4 w-full"
-            ),
-            Div(
-                id="dataset-visualization",
-                hx_get="/get_dataset_viz",
-                hx_trigger="load",
-                cls="h-[200px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-4 w-full"
-            ),
-            id="training-content",
-            cls="w-full"
-        )
+        print(f"Before train step: {visualizer.step_count}")  # Debug print
+        visualizer.train_step()
+        print(f"After train step: {visualizer.step_count}")   # Debug print
+        return progress_tracker(visualizer.step_count, 
+                                f"{visualizer.train_losses[-1]:.6f}" if visualizer.train_losses else "---",
+                                f"{visualizer.val_losses[-1]:.6f}" if visualizer.val_losses else "---")
     except Exception as e:
-        print(f"Error in train_step: {str(e)}")  # For debugging
-        return Div(f"An error occurred: {str(e)}", cls="text-red-500 w-full")
-    
+        print(f"Error in train_step: {str(e)}")
+        return Div(f"An error occurred: {str(e)}", cls="text-red-500")
+
+
 def create_graph_svg(graph_data):
     svg_content = []
     
@@ -936,24 +987,26 @@ async def get():
     return Div("Dataset visualization placeholder")
 
 def progress_tracker(step_count, train_loss, val_loss):
-    return Div(
-        Svg(
-            Rect(x=0, y=0, width=600, height=50, fill="#f0f0f0", stroke="#000000"),
-            Text(f"Step {step_count}/100", x=10, y=30, font_size="16", font_weight="bold"),
-            Text(f"Train loss: {train_loss}", x=150, y=30, font_size="14"),
-            Text(f"Validation loss: {val_loss}", x=350, y=30, font_size="14"),
-            width="100%", height="50",
-            preserveAspectRatio="xMidYMid meet",
-            viewBox="0 0 600 50",
-        ),        
-        cls="w-full bg-gray-100 rounded-t-lg shadow-md",
-        id="progress-tracker"
+    return Svg(
+        Rect(x=0, y=0, width=600, height=50, fill="#f0f0f0", stroke="#000000"),
+        Text(f"Step {step_count}/100", x=10, y=30, font_size="16", font_weight="bold"),
+        Text(f"Train loss: {train_loss}", x=150, y=30, font_size="14"),
+        Text(f"Validation loss: {val_loss}", x=350, y=30, font_size="14"),
+        width="100%", height="50",
+        preserveAspectRatio="xMidYMid meet",
+        viewBox="0 0 600 50",
     )
+
+@rt('/play')
+async def post(request: Request):
+    start = int(request.query_params.get('start', 0))
+    batch = await visualizer.get_next_batch(start)
+    return {'batch': batch}
 
 @rt('/reset')
 async def post():
     visualizer.reset()
-    visualizer.initialize_model()
+    # visualizer.initialize_model()
     return Div(
         progress_tracker(0, "---", "---"),
         Div(
@@ -965,49 +1018,6 @@ async def post():
         id="training-content",
         cls="w-full"
     )
-
-
-@rt('/toggle_play')
-async def post():
-    is_playing = visualizer.toggle_play()
-    return {
-        "is_playing": is_playing,
-        "step_count": visualizer.step_count,
-        "train_loss": visualizer.get_latest_losses()[0],
-        "val_loss": visualizer.get_latest_losses()[1],
-        "graph_data": visualizer.get_graph_data()
-    }
-
-
-# @rt('/toggle_play')
-# async def post():
-#     is_playing = visualizer.toggle_play()
-#     button_text = "Pause" if is_playing else "Play"
-#     button_color = "red" if is_playing else "green"
-    
-#     train_loss, val_loss = visualizer.get_latest_losses()
-    
-#     return Div(
-#         control_buttons(is_playing),
-#         Div(
-#             Div(progress_tracker(
-#                 visualizer.step_count,
-#                 f"{train_loss:.6f}" if train_loss is not None else "---",
-#                 f"{val_loss:.6f}" if val_loss is not None else "N/A"
-#             ), id="progress-tracker"),
-#             Div(
-#                 visualizer.get_graph_visualization(),
-#                 id="training-viz",
-#                 cls="w-full h-[450px] bg-white border-2 border-t-0 border-gray-300 rounded-b-lg shadow-lg overflow-hidden p-8"
-#             ),
-#             id="results",
-#             cls="w-full"
-#         ),
-#         id="training-progress",
-#         hx_target="#training-progress",
-#         hx_swap="outerHTML",
-#         cls="w-full"
-#     )
 
 # Run the app
 serve()
