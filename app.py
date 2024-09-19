@@ -375,26 +375,23 @@ def draw_dot(root, format='svg', rankdir='LR', outfile='graph'):
 class Visualizer:
     def __init__(self):
         self.model = None
-        self.train_split = None
-        self.val_split = None
-        self.test_split = None
         self.step_count = 0
         self.train_losses = []
         self.val_losses = []
-        self.current_batch = []
+        self.train_split = []
+        self.val_split = []
+        self.test_split = []
         self.batch_size = 20
-        self.is_playing = False
-        self.optimizer = None
         self.progress_tracker = {
             'step_count': 0,
             'train_loss': "---",
             'val_loss': "---"
         }
+        self.initialize_model()
 
     def initialize_model(self):
         self.model = MLP(2, [8, 3])
         self.optimizer = AdamW(self.model.parameters(), lr=1e-1, weight_decay=1e-4)
-
 
     def reset(self):
         if self.model is None:
@@ -412,55 +409,13 @@ class Visualizer:
         # Reset optimizer
         self.optimizer = AdamW(self.model.parameters(), lr=1e-1, weight_decay=1e-4)
 
-
-    def get_state(self):
-        return {
-            'progress_tracker': self.progress_tracker,
-            'graph_data': self.get_graph_data()
-        }
-    
-    async def get_next_batch(self, start):
-        batch = []
-        for i in range(self.batch_size):
-            step = start + i
-            if step >= 100:  # Assuming 100 is the total number of steps
-                break
-            # Generate data for this step
-            train_loss = self.train_step()
-            val_loss = self.val_loss()  # Assuming you have a method to calculate validation loss
-            graph_data = self.get_graph_data()
-            batch.append({
-                'step': step,
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'graph_data': graph_data
-            })
-        return batch
-    
-    def get_model_state(self):
-        return {
-            "parameters": [
-                {
-                    "data": p.data,
-                    "grad": p.grad,
-                    "_op": p._op if hasattr(p, '_op') else '',
-                    "_prev": [id(prev) for prev in p._prev] if hasattr(p, '_prev') else []
-                }
-                for p in self.model.parameters()
-            ],
-            "structure": str(self.model)
+        # Reset progress tracker
+        self.progress_tracker = {
+            'step_count': 0,
+            'train_loss': "---",
+            'val_loss': "---"
         }
 
-    def get_latest_losses(self):
-        return (self.train_losses[-1] if self.train_losses else None,
-                self.val_losses[-1] if self.val_losses else None)
-
-    def get_training_data(self):
-        return [{"x": x, "y": y} for x, y in self.train_split]
-
-    def get_validation_data(self):
-        return [{"x": x, "y": y} for x, y in self.val_split]
-    
     def generate_dataset(self, n=100):        
         self.train_split, self.val_split, self.test_split = gen_data_yinyang(random, n=n)
         # Initialize the model if it doesn't exist
@@ -470,25 +425,23 @@ class Visualizer:
         # Now reset the training progress
         self.reset()
 
-    def loss_fun(self, split):
-        total_loss = Value(0.0)
-        for x, y in split:
-            logits = self.model(x)
-            loss = cross_entropy(logits, y)
-            total_loss = total_loss + loss
-        mean_loss = total_loss * (1.0 / len(split))
-        return mean_loss
+    async def get_next_batch(self, start):
+        batch = []
+        for i in range(self.batch_size):
+            step_data = self.train_step()
+            if step_data is None:
+                break
+            batch.append(step_data)
+        return batch
     
-    def toggle_play(self):
-        self.is_playing = not self.is_playing
-        return self.is_playing
-    
+
     def train_step(self):
         if not self.model or not self.train_split:
             raise ValueError("Model or training data not initialized")
         
         # Perform one training step
-        loss = self.loss_fun(self.train_split)
+        X_train, y_train = zip(*self.train_split)
+        loss = self.loss_fun(X_train, y_train)
         loss.backward()
         self.optimizer.step()
         self.optimizer.zero_grad()
@@ -498,41 +451,29 @@ class Visualizer:
 
         # Evaluate validation loss every 10 steps
         if self.step_count % 10 == 0 and self.val_split:
-            val_loss = self.loss_fun(self.val_split)
+            X_val, y_val = zip(*self.val_split)
+            val_loss = self.loss_fun(X_val, y_val)
             self.val_losses.append(val_loss.data)
         
         # Update progress tracker
         self.progress_tracker = {
             'step_count': self.step_count,
             'train_loss': f"{self.train_losses[-1]:.6f}" if self.train_losses else "---",
-            'val_loss': f"{self.val_losses[-1]:.6f}" if self.val_losses else "---"
+            'val_loss': f"{self.val_losses[-1]:.6f}" if self.val_losses and len(self.val_losses) > 0 else "---"
         }
         
-        return loss.data
+        print(f"Step {self.step_count}, Train Loss: {self.progress_tracker['train_loss']}, Val Loss: {self.progress_tracker['val_loss']}")
+        
+        return self.progress_tracker 
 
-    def get_latest_losses(self):
-        train_loss = self.train_losses[-1] if self.train_losses else None
-        val_loss = self.val_losses[-1] if self.val_losses else None
-        return train_loss, val_loss
-
-    def get_train_data(self):
-        return [
-            {'x': point[0][0], 'y': point[0][1], 'class': point[1]}
-            for point in self.train_split
-        ] if self.train_split else []
-    
-    def get_all_data(self):
-        all_data = []
-        for point in self.train_split:
-            all_data.append((self.point_to_dict(point), 'train'))
-        for point in self.val_split:
-            all_data.append((self.point_to_dict(point), 'validation'))
-        for point in self.test_split:
-            all_data.append((self.point_to_dict(point), 'test'))
-        return all_data
-
-    def point_to_dict(self, point):
-        return {'x': point[0][0], 'y': point[0][1], 'class': point[1]}
+    def loss_fun(self, X, y):
+        total_loss = Value(0.0)
+        for x, y in zip(X, y):
+            logits = self.model(x)
+            loss = cross_entropy(logits, y)
+            total_loss = total_loss + loss
+        mean_loss = total_loss * (1.0 / len(X))
+        return mean_loss
 
     def get_graph_data(self):
         nodes = []
@@ -570,135 +511,142 @@ class Visualizer:
             "edges": edges
         }
 
-    
-    def get_graph_visualization(self):
-        x, y = (Value(0.0), Value(0.0)), 0
-        loss = self.loss_fun([(x, y)])
-        loss.backward()
-        vis_color(x, "lightblue")
-        
-        nodes, edges = trace(loss)
-        
-        svg_elements = []
-        for i, n in enumerate(nodes):
-            fillcolor = n._vis_color if hasattr(n, '_vis_color') else "white"
-            x, y = 50 + (i % 5) * 100, 50 + (i // 5) * 100
-            svg_elements.append(
-                G(
-                    Circle(cx=x, cy=y, r=20, fill=fillcolor, stroke="black"),
-                    Text(f"data: {n.data:.4f}", x=x, y=y-5, text_anchor="middle", font_size="8"),
-                    Text(f"grad: {n.grad:.4f}", x=x, y=y+5, text_anchor="middle", font_size="8"),
-                    id=str(id(n))
-                )
-            )
-            if n._op:
-                svg_elements.append(
-                    Text(n._op, x=x, y=y-30, text_anchor="middle", font_size="10")
-                )
+    def get_all_data(self):
+        all_data = []
+        for point in self.train_split:
+            all_data.append((self.point_to_dict(point), 'train'))
+        for point in self.val_split:
+            all_data.append((self.point_to_dict(point), 'validation'))
+        return all_data
 
-        for n1, n2 in edges:
-            x1, y1 = 50 + (nodes.index(n1) % 5) * 100, 50 + (nodes.index(n1) // 5) * 100
-            x2, y2 = 50 + (nodes.index(n2) % 5) * 100, 50 + (nodes.index(n2) // 5) * 100
-            svg_elements.append(
-                Line(x1=x1, y1=y1, x2=x2, y2=y2, stroke="black")
-            )
-
-        return Svg(*svg_elements, width=600, height=400)
-
+    def point_to_dict(self, point):
+        return {'x': point[0][0], 'y': point[0][1], 'class': point[1]}
 
 visualizer = Visualizer()
 
+@rt('/progress_tracker')
+async def get():
+    return progress_tracker(visualizer.step_count,
+                            f"{visualizer.train_losses[-1]:.6f}" if visualizer.train_losses else "---",
+                            f"{visualizer.val_losses[-1]:.6f}" if visualizer.val_losses else "---")
+
+@rt('/play')
+async def get(start: int = 0):
+    visualizer.step_count = start  # Ensure we start from the correct step
+    batch = await visualizer.get_next_batch(start)
+    return {
+        'batch': batch,
+        'current_step': visualizer.step_count
+    }
+
+@rt('/train_step')
+async def post():
+    step_data = visualizer.train_step()
+    if step_data is None:
+        return {"error": "Training complete"}
+    return progress_tracker(step_data['step_count'],
+                            f"{step_data['train_loss']:.6f}" if isinstance(step_data['train_loss'], float) else step_data['train_loss'],
+                            f"{step_data['val_loss']:.6f}" if isinstance(step_data['val_loss'], float) else step_data['val_loss'])
+
+def progress_tracker(step_count, train_loss, val_loss):
+    return Svg(
+        Rect(x=0, y=0, width=600, height=50, fill="#f0f0f0", stroke="#000000"),
+        Text(f"Step {step_count}/100", x=10, y=30, font_size="16", font_weight="bold"),
+        Text(f"Train loss: {train_loss}", x=150, y=30, font_size="14"),
+        Text(f"Validation loss: {val_loss}", x=350, y=30, font_size="14"),
+        width="100%", height="50",
+        preserveAspectRatio="xMidYMid meet",
+        viewBox="0 0 600 50",
+    ), Input(type="hidden", id="current-step", value=str(step_count))
+    
+
+
 animation_script="""
 let currentStep = 0;
-let currentBatch = [];
-let nextBatch = [];
 let isPlaying = false;
-let batchSize = 20;
+let animationId = null;
+const STEP_DELAY = 300; // 300ms delay between steps
 
-async function fetchBatch(start) {
-    const response = await fetch(`/play?start=${start}&size=${batchSize}`);
-    return await response.json();
+async function playAnimation() {
+    if (!isPlaying) return;
+
+    await updateProgressTracker();
+    
+    setTimeout(() => {
+        animationId = requestAnimationFrame(playAnimation);
+    }, STEP_DELAY);
 }
 
-async function preloadNextBatch() {
-    nextBatch = await fetchBatch(currentStep + batchSize);
+async function updateProgressTracker() {
+    const response = await fetch('/train_step', { method: 'POST' });
+    const html = await response.text();
+    document.getElementById('training-content').innerHTML = html;
+    currentStep = getCurrentStep();
+    updateVisualization();    
 }
 
-async function handlePlay() {
-    if (!isPlaying) {
-        isPlaying = true;
-        if (currentBatch.length === 0) {
-            currentBatch = await fetchBatch(currentStep);
-            preloadNextBatch();
-        }
-        requestAnimationFrame(playAnimation);
+function getCurrentStep() {
+    const stepInput = document.getElementById('current-step');
+    return stepInput ? parseInt(stepInput.value, 10) : 0;
+}
+
+function extractTrainLoss() {
+    const lossElement = document.querySelector('#training-content text:nth-of-type(2)');
+    return lossElement ? lossElement.textContent.split(': ')[1] : "N/A";
+}
+
+function updateVisualization() {
+    // Update your visualization here    
+}
+
+function handlePlayPause() {
+    if (isPlaying) {
+        handlePause();
+    } else {
+        handlePlay();
     }
+}
+
+function handlePlay() {
+    isPlaying = true;
+    const playPauseBtn = document.getElementById('play-pause-btn');
+    playPauseBtn.textContent = 'Pause';
+    playPauseBtn.classList.remove('bg-green-500');
+    playPauseBtn.classList.add('bg-red-500');
+    playAnimation();
 }
 
 function handlePause() {
     isPlaying = false;
+    cancelAnimationFrame(animationId);
+    const playPauseBtn = document.getElementById('play-pause-btn');
+    playPauseBtn.textContent = 'Play';
+    playPauseBtn.classList.remove('bg-red-500');
+    playPauseBtn.classList.add('bg-green-500');
 }
 
-async function playAnimation(timestamp) {
-    if (!isPlaying) return;
+// Add event listener for the play/pause button
+document.getElementById('play-pause-btn').addEventListener('click', handlePlayPause);
 
-    if (currentStep % batchSize === batchSize - 5) {
-        // Start preloading when 5 steps away from needing the next batch
-        preloadNextBatch();
-    }
-
-    if (currentStep % batchSize === 0 && currentStep > 0) {
-        currentBatch = nextBatch;
-        nextBatch = [];
-    }
-
-    const stepData = currentBatch[currentStep % batchSize];
-    if (!stepData) {
-        isPlaying = false;
-        return;
-    }
-
-    updateVisualization(stepData);
-    currentStep++;
-
-    if (currentStep < 100) {  // Assuming 100 is the total number of steps
-        requestAnimationFrame(playAnimation);
+// Function to update currentStep when HTMX updates the progress tracker
+function updateCurrentStepFromHtmx(evt) {
+    if (evt.detail.elt.id === 'training-content') {
+        currentStep = getCurrentStep();
     }
 }
 
-function updateVisualization(stepData) {
-    // Update the progress tracker and graph visualization
-    document.getElementById('training-content').innerHTML = htmx.ajax('GET', `/step?step=${stepData.step}&train_loss=${stepData.train_loss}&val_loss=${stepData.val_loss}`).responseText;
-    updateGraph(stepData.graph_data);
-}
+// Listen for HTMX after swap event
+document.body.addEventListener('htmx:afterSwap', updateCurrentStepFromHtmx);
 
-function updateGraphVisualization(graphData) {
-    // Update node values and gradients
-    for (const node of graphData.nodes) {
-        const nodeElement = document.querySelector(`#node-${node.id}`);
-        if (nodeElement) {
-            nodeElement.querySelector('.value').textContent = node.value.toFixed(4);
-            nodeElement.querySelector('.grad').textContent = node.grad.toFixed(4);
-        }
-    }
-
-    // Update edge gradients
-    for (const edge of graphData.edges) {
-        const edgeElement = document.querySelector(`#edge-${edge.from}-${edge.to}`);
-        if (edgeElement && edge.grad !== null) {
-            const gradientStrength = Math.abs(edge.grad);
-            edgeElement.style.strokeWidth = `${1 + gradientStrength * 5}px`;
-            edgeElement.style.stroke = edge.grad > 0 ? 'blue' : 'red';
-        }
-    }
-}
-
-
+// Initialize currentStep on page load
+document.addEventListener('DOMContentLoaded', () => {
+    currentStep = getCurrentStep();
+});
 """
 
 @rt('/')
 def get():
-    return Title("Micrograd"),Div(                
+    return Title("Micrograd Visualizer"),Div(                
         H1("Micrograd Visualizer", cls="text-3xl font-bold mb-4 w-full text-center"),
         Div(
             # Dataset Section (Left Column)
@@ -754,7 +702,7 @@ def control_buttons(is_playing=False):
         Button("Reset", id="reset-btn", hx_post="/reset", hx_target="#training-content", hx_swap="innerHTML",
                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Reset"),
-        Button("Play", id="play-pause-btn", hx_post="/play",
+        Button("Play", id="play-pause-btn",
                cls="bg-green-500 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Play/Pause"),
         Button("Train Step", id="step-btn", hx_post="/train_step", hx_target="#training-content", hx_swap="innerHTML", hx_trigger="click",
@@ -862,7 +810,6 @@ class StepData(BaseModel):
     step_count: int
     train_loss: str
     val_loss: str
-    graph_data: Dict[str, Any]
 
 
 @rt('/get_step_batch')
@@ -931,18 +878,6 @@ async def post():
         cls="w-full"
     )
 
-@rt('/train_step')
-async def post():
-    try:
-        print(f"Before train step: {visualizer.step_count}")  # Debug print
-        visualizer.train_step()
-        print(f"After train step: {visualizer.step_count}")   # Debug print
-        return progress_tracker(visualizer.step_count, 
-                                f"{visualizer.train_losses[-1]:.6f}" if visualizer.train_losses else "---",
-                                f"{visualizer.val_losses[-1]:.6f}" if visualizer.val_losses else "---")
-    except Exception as e:
-        print(f"Error in train_step: {str(e)}")
-        return Div(f"An error occurred: {str(e)}", cls="text-red-500")
 
 
 def create_graph_svg(graph_data):
@@ -982,31 +917,12 @@ async def get():
     return create_graph_svg(graph_data)
 
 @rt('/get_dataset_viz')
-async def get():
-    # This would return your dataset visualization
+async def get():    
     return Div("Dataset visualization placeholder")
-
-def progress_tracker(step_count, train_loss, val_loss):
-    return Svg(
-        Rect(x=0, y=0, width=600, height=50, fill="#f0f0f0", stroke="#000000"),
-        Text(f"Step {step_count}/100", x=10, y=30, font_size="16", font_weight="bold"),
-        Text(f"Train loss: {train_loss}", x=150, y=30, font_size="14"),
-        Text(f"Validation loss: {val_loss}", x=350, y=30, font_size="14"),
-        width="100%", height="50",
-        preserveAspectRatio="xMidYMid meet",
-        viewBox="0 0 600 50",
-    )
-
-@rt('/play')
-async def post(request: Request):
-    start = int(request.query_params.get('start', 0))
-    batch = await visualizer.get_next_batch(start)
-    return {'batch': batch}
 
 @rt('/reset')
 async def post():
     visualizer.reset()
-    # visualizer.initialize_model()
     return Div(
         progress_tracker(0, "---", "---"),
         Div(
