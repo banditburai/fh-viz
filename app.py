@@ -389,11 +389,6 @@ class Visualizer:
         self.test_split = []
         self.batch_size = 20
         self.is_training = False
-        self.progress_tracker = {
-            'step_count': 0,
-            'train_loss': "---",
-            'val_loss': "---"
-        }
         self.initialize_model()
 
     def initialize_model(self):
@@ -424,12 +419,6 @@ class Visualizer:
             'val_loss': "---"
         }
 
-    def start_training(self):
-        self.is_training = True
-
-    def stop_training(self):
-        self.is_training = False
-
     def generate_dataset(self, n=100):        
         self.train_split, self.val_split, self.test_split = gen_data_yinyang(random, n=n)
         # Initialize the model if it doesn't exist
@@ -439,15 +428,6 @@ class Visualizer:
         # Now reset the training progress
         self.reset()
 
-    async def get_next_batch(self, start):
-        batch = []
-        for i in range(self.batch_size):
-            step_data = self.train_step()
-            if step_data is None:
-                break
-            batch.append(step_data)
-        return batch
-    
     def train_step(self):
         if not self.model or not self.train_split or not self.is_training:
             return self.get_current_step()
@@ -478,9 +458,6 @@ class Visualizer:
             'val_loss': f"{self.val_losses[-1]:.6f}" if self.val_losses and len(self.val_losses) > 0 else "---",
             'is_training': self.is_training
         }
-    
-    def get_training_status(self):
-        return {"is_training": self.is_training}
 
     def loss_fun(self, X, y):
         total_loss = Value(0.0)
@@ -515,7 +492,6 @@ class Visualizer:
                 })
                 traverse(child)
 
-        # Assuming self.model has an output node or a list of parameters
         if hasattr(self.model, 'output'):
             traverse(self.model.output)
         elif hasattr(self.model, 'parameters'):
@@ -539,11 +515,6 @@ class Visualizer:
         return {'x': point[0][0], 'y': point[0][1], 'class': point[1]}
 
 visualizer = Visualizer()
-
-@rt('/training_status')
-async def get():
-    return visualizer.get_training_status()
-
 
 @rt('/train_stream')
 async def get(request):
@@ -579,41 +550,6 @@ async def get():
                             f"{visualizer.train_losses[-1]:.6f}" if visualizer.train_losses else "---",
                             f"{visualizer.val_losses[-1]:.6f}" if visualizer.val_losses else "---")
 
-@rt('/play')
-async def get(start: int = 0):
-    visualizer.step_count = start  # Ensure we start from the correct step
-    batch = await visualizer.get_next_batch(start)
-    return {
-        'batch': batch,
-        'current_step': visualizer.step_count
-    }
-
-@rt('/train_step')
-async def post(current_step: int):
-    if visualizer.model is None or not visualizer.train_split:
-        return {"error": "Model or data not initialized"}
-    
-    visualizer.train_step()
-    return {"success": True}
-
-@rt('/get_batch')
-async def get(start: int = 0, batch_size: int = 20):
-    visualizer.step_count = start  # Ensure we start from the correct step
-    batch = []
-    for i in range(batch_size):
-        step_data = visualizer.train_step()
-        if step_data is None:
-            break
-        batch.append({
-            'step_count': step_data['step_count'],
-            'train_loss': f"{step_data['train_loss']:.6f}" if isinstance(step_data['train_loss'], float) else step_data['train_loss'],
-            'val_loss': f"{step_data['val_loss']:.6f}" if isinstance(step_data['val_loss'], float) else step_data['val_loss']
-        })
-    return {
-        'batch': batch,
-        'current_step': visualizer.step_count
-    }
-
 def progress_tracker(step_count, train_loss, val_loss):
     return Svg(
         Rect(x=0, y=0, width=600, height=50, fill="#f0f0f0", stroke="#000000"),
@@ -624,25 +560,6 @@ def progress_tracker(step_count, train_loss, val_loss):
         preserveAspectRatio="xMidYMid meet",
         viewBox="0 0 600 50",
     )
-    
-@rt('/start_training')
-async def post():
-    visualizer.start_training()
-    return {"success": True}
-
-@rt('/stop_training')
-async def post():
-    visualizer.stop_training()
-    return {"success": True}
-
-@rt('/train_single_step')
-async def post():
-    if not visualizer.is_training:
-        visualizer.start_training()
-        visualizer.train_step()
-        visualizer.stop_training()
-    return {"success": True}
-
 
 animation_script = """
 let isTraining = false;
@@ -748,7 +665,7 @@ document.getElementById('play-pause-btn').addEventListener('click', handlePlayPa
 document.getElementById('step-btn').addEventListener('click', handleTrainStep);
 document.getElementById('reset-btn').addEventListener('click', handleReset);
 
-// Add this function to close the SSE connection when leaving the page
+
 window.addEventListener('beforeunload', function() {
     if (eventSource) {
         eventSource.close();
@@ -926,13 +843,6 @@ def create_dataset_svg(data):
     ]
 
     return svg_content
-
-class StepData(BaseModel):
-    step_count: int
-    train_loss: str
-    val_loss: str
-
-
 
 
 
