@@ -6,12 +6,18 @@ from fasthtml.svg import *
 from graphviz import Digraph
 from pydantic import BaseModel
 from typing import List, Dict, Any
+import json
+import asyncio
+import time
 
 tailwindLink = Link(rel="stylesheet", href="assets/output.css", type="text/css")
+sselink = Script(src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js")
 app, rt = fast_app(
     pico=False,    
-    hdrs=(tailwindLink,)
+    hdrs=(tailwindLink, sselink)
 )
+
+setup_toasts(app)
 
 # -----------------------------------------------------------------------------
 # rng related
@@ -382,6 +388,7 @@ class Visualizer:
         self.val_split = []
         self.test_split = []
         self.batch_size = 20
+        self.is_training = False
         self.progress_tracker = {
             'step_count': 0,
             'train_loss': "---",
@@ -398,6 +405,7 @@ class Visualizer:
             self.initialize_model()
         
         # Reset training progress
+        self.is_training = False
         self.step_count = 0
         self.train_losses = []
         self.val_losses = []
@@ -415,6 +423,12 @@ class Visualizer:
             'train_loss': "---",
             'val_loss': "---"
         }
+
+    def start_training(self):
+        self.is_training = True
+
+    def stop_training(self):
+        self.is_training = False
 
     def generate_dataset(self, n=100):        
         self.train_split, self.val_split, self.test_split = gen_data_yinyang(random, n=n)
@@ -434,37 +448,39 @@ class Visualizer:
             batch.append(step_data)
         return batch
     
-
     def train_step(self):
-        if not self.model or not self.train_split:
-            raise ValueError("Model or training data not initialized")
+        if not self.model or not self.train_split or not self.is_training:
+            return self.get_current_step()
         
-        # Perform one training step
-        X_train, y_train = zip(*self.train_split)
-        loss = self.loss_fun(X_train, y_train)
-        loss.backward()
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+        if self.is_training:
+            # Perform one training step
+            X_train, y_train = zip(*self.train_split)
+            loss = self.loss_fun(X_train, y_train)
+            loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
-        self.step_count += 1
-        self.train_losses.append(loss.data)
+            self.step_count += 1
+            self.train_losses.append(loss.data)
 
-        # Evaluate validation loss every 10 steps
-        if self.step_count % 10 == 0 and self.val_split:
-            X_val, y_val = zip(*self.val_split)
-            val_loss = self.loss_fun(X_val, y_val)
-            self.val_losses.append(val_loss.data)
+            # Evaluate validation loss every 10 steps
+            if self.step_count % 10 == 0 and self.val_split:
+                X_val, y_val = zip(*self.val_split)
+                val_loss = self.loss_fun(X_val, y_val)
+                self.val_losses.append(val_loss.data)
         
-        # Update progress tracker
-        self.progress_tracker = {
+        return self.get_current_step()
+
+    def get_current_step(self):
+        return {
             'step_count': self.step_count,
             'train_loss': f"{self.train_losses[-1]:.6f}" if self.train_losses else "---",
-            'val_loss': f"{self.val_losses[-1]:.6f}" if self.val_losses and len(self.val_losses) > 0 else "---"
+            'val_loss': f"{self.val_losses[-1]:.6f}" if self.val_losses and len(self.val_losses) > 0 else "---",
+            'is_training': self.is_training
         }
-        
-        print(f"Step {self.step_count}, Train Loss: {self.progress_tracker['train_loss']}, Val Loss: {self.progress_tracker['val_loss']}")
-        
-        return self.progress_tracker 
+    
+    def get_training_status(self):
+        return {"is_training": self.is_training}
 
     def loss_fun(self, X, y):
         total_loss = Value(0.0)
@@ -524,6 +540,38 @@ class Visualizer:
 
 visualizer = Visualizer()
 
+@rt('/training_status')
+async def get():
+    return visualizer.get_training_status()
+
+
+
+@rt('/train_stream')
+async def get(request):
+    async def event_stream():
+        heartbeat_interval = 30  # Send heartbeat every 30 seconds when not training
+        last_heartbeat = 0
+        while True:
+            train = request.query_params.get('train', '').lower() == 'true'
+            step = request.query_params.get('step', '').lower() == 'true'
+            
+            if train or step:
+                visualizer.is_training = True
+                step_data = visualizer.train_step()
+                if step:
+                    visualizer.is_training = False
+                yield f"event: step\ndata: {json.dumps(step_data)}\n\n"
+                await asyncio.sleep(0.3)  # 300ms delay between training steps
+            else:
+                visualizer.is_training = False
+                current_time = time.time()
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    yield f"event: heartbeat\ndata: {{}}\n\n"
+                    last_heartbeat = current_time
+                await asyncio.sleep(1)  # Check every second, but only send heartbeat at interval
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
 @rt('/progress_tracker')
 async def get():
     return progress_tracker(visualizer.step_count,
@@ -540,109 +588,177 @@ async def get(start: int = 0):
     }
 
 @rt('/train_step')
-async def post():
-    step_data = visualizer.train_step()
-    if step_data is None:
-        return {"error": "Training complete"}
-    return progress_tracker(step_data['step_count'],
-                            f"{step_data['train_loss']:.6f}" if isinstance(step_data['train_loss'], float) else step_data['train_loss'],
-                            f"{step_data['val_loss']:.6f}" if isinstance(step_data['val_loss'], float) else step_data['val_loss'])
+async def post(current_step: int):
+    if visualizer.model is None or not visualizer.train_split:
+        return {"error": "Model or data not initialized"}
+    
+    visualizer.train_step()
+    return {"success": True}
+
+@rt('/get_batch')
+async def get(start: int = 0, batch_size: int = 20):
+    visualizer.step_count = start  # Ensure we start from the correct step
+    batch = []
+    for i in range(batch_size):
+        step_data = visualizer.train_step()
+        if step_data is None:
+            break
+        batch.append({
+            'step_count': step_data['step_count'],
+            'train_loss': f"{step_data['train_loss']:.6f}" if isinstance(step_data['train_loss'], float) else step_data['train_loss'],
+            'val_loss': f"{step_data['val_loss']:.6f}" if isinstance(step_data['val_loss'], float) else step_data['val_loss']
+        })
+    return {
+        'batch': batch,
+        'current_step': visualizer.step_count
+    }
 
 def progress_tracker(step_count, train_loss, val_loss):
     return Svg(
         Rect(x=0, y=0, width=600, height=50, fill="#f0f0f0", stroke="#000000"),
-        Text(f"Step {step_count}/100", x=10, y=30, font_size="16", font_weight="bold"),
-        Text(f"Train loss: {train_loss}", x=150, y=30, font_size="14"),
-        Text(f"Validation loss: {val_loss}", x=350, y=30, font_size="14"),
+        Text(f"Step {step_count}/100", x=10, y=30, font_size="16", font_weight="bold", id="step-text"),
+        Text(f"Train loss: {train_loss:.6f}" if isinstance(train_loss, float) else f"Train loss: {train_loss}", x=150, y=30, font_size="14", id="train-loss-text"),
+        Text(f"Validation loss: {val_loss:.6f}" if isinstance(val_loss, float) else f"Validation loss: {val_loss}", x=350, y=30, font_size="14", id="val-loss-text"),
         width="100%", height="50",
         preserveAspectRatio="xMidYMid meet",
         viewBox="0 0 600 50",
-    ), Input(type="hidden", id="current-step", value=str(step_count))
+    )
     
+@rt('/start_training')
+async def post():
+    visualizer.start_training()
+    return {"success": True}
+
+@rt('/stop_training')
+async def post():
+    visualizer.stop_training()
+    return {"success": True}
+
+@rt('/train_single_step')
+async def post():
+    if not visualizer.is_training:
+        visualizer.start_training()
+        visualizer.train_step()
+        visualizer.stop_training()
+    return {"success": True}
 
 
-animation_script="""
-let currentStep = 0;
-let isPlaying = false;
-let animationId = null;
-const STEP_DELAY = 300; // 300ms delay between steps
+animation_script = """
+let isTraining = false;
+let eventSource;
+let reconnectAttempts = 0;
+const maxReconnectAttempts = 5;
+const reconnectDelay = 5000; // 5 seconds
 
-async function playAnimation() {
-    if (!isPlaying) return;
+function updatePlayPauseButton() {
+    const playPauseBtn = document.getElementById('play-pause-btn');
+    if (isTraining) {
+        playPauseBtn.textContent = 'Pause';
+        playPauseBtn.classList.remove('bg-green-500');
+        playPauseBtn.classList.add('bg-red-500');
+    } else {
+        playPauseBtn.textContent = 'Play';
+        playPauseBtn.classList.remove('bg-red-500');
+        playPauseBtn.classList.add('bg-green-500');
+    }
+}
 
-    await updateProgressTracker();
+function updateSSEConnection() {
+    if (eventSource) {
+        eventSource.close();
+    }
     
-    setTimeout(() => {
-        animationId = requestAnimationFrame(playAnimation);
-    }, STEP_DELAY);
-}
+    if (reconnectAttempts >= maxReconnectAttempts) {
+        console.error('Max reconnection attempts reached. Please refresh the page.');
+        return;
+    }
 
-async function updateProgressTracker() {
-    const response = await fetch('/train_step', { method: 'POST' });
-    const html = await response.text();
-    document.getElementById('training-content').innerHTML = html;
-    currentStep = getCurrentStep();
-    updateVisualization();    
-}
+    const url = `/train_stream?train=${isTraining}`;
+    eventSource = new EventSource(url);
+    
+    eventSource.addEventListener('open', function(e) {
+        console.log('SSE connection opened');
+        reconnectAttempts = 0; // Reset attempts on successful connection
+    });
 
-function getCurrentStep() {
-    const stepInput = document.getElementById('current-step');
-    return stepInput ? parseInt(stepInput.value, 10) : 0;
-}
+    eventSource.addEventListener('step', function(e) {
+        const data = JSON.parse(e.data);
+        updateProgressTracker(data);
+    });
 
-function extractTrainLoss() {
-    const lossElement = document.querySelector('#training-content text:nth-of-type(2)');
-    return lossElement ? lossElement.textContent.split(': ')[1] : "N/A";
-}
+    eventSource.addEventListener('heartbeat', function(e) {
+        console.log('Heartbeat received');
+    });
 
-function updateVisualization() {
-    // Update your visualization here    
+    eventSource.addEventListener('error', function(e) {
+        console.error('SSE connection error:', e);
+        eventSource.close();
+        reconnectAttempts++;
+        setTimeout(updateSSEConnection, reconnectDelay);
+    });
 }
 
 function handlePlayPause() {
-    if (isPlaying) {
-        handlePause();
-    } else {
-        handlePlay();
+    isTraining = !isTraining;
+    updatePlayPauseButton();
+    updateSSEConnection();
+}
+
+function handleTrainStep() {
+    if (!isTraining) {
+        if (eventSource) {
+            eventSource.close();
+        }
+        eventSource = new EventSource('/train_stream?step=true');
+        eventSource.addEventListener('step', function(e) {
+            const data = JSON.parse(e.data);
+            updateProgressTracker(data);
+            this.close();
+            updateSSEConnection();
+        });
     }
 }
 
-function handlePlay() {
-    isPlaying = true;
-    const playPauseBtn = document.getElementById('play-pause-btn');
-    playPauseBtn.textContent = 'Pause';
-    playPauseBtn.classList.remove('bg-green-500');
-    playPauseBtn.classList.add('bg-red-500');
-    playAnimation();
+function handleReset() {
+    fetch('/reset', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            updateProgressTracker(data);
+            isTraining = false;
+            updatePlayPauseButton();
+            updateSSEConnection();
+            console.log(`Reset to step 0`);
+        });
 }
 
-function handlePause() {
-    isPlaying = false;
-    cancelAnimationFrame(animationId);
-    const playPauseBtn = document.getElementById('play-pause-btn');
-    playPauseBtn.textContent = 'Play';
-    playPauseBtn.classList.remove('bg-red-500');
-    playPauseBtn.classList.add('bg-green-500');
+function updateProgressTracker(data) {
+    const stepText = document.getElementById('step-text');
+    const trainLossText = document.getElementById('train-loss-text');
+    const valLossText = document.getElementById('val-loss-text');
+
+    if (stepText) stepText.textContent = `Step ${data.step_count}/100`;
+    if (trainLossText) trainLossText.textContent = `Train loss: ${data.train_loss}`;
+    if (valLossText) valLossText.textContent = `Validation loss: ${data.val_loss}`;
 }
 
-// Add event listener for the play/pause button
+// Add event listeners
 document.getElementById('play-pause-btn').addEventListener('click', handlePlayPause);
+document.getElementById('step-btn').addEventListener('click', handleTrainStep);
+document.getElementById('reset-btn').addEventListener('click', handleReset);
 
-// Function to update currentStep when HTMX updates the progress tracker
-function updateCurrentStepFromHtmx(evt) {
-    if (evt.detail.elt.id === 'training-content') {
-        currentStep = getCurrentStep();
+// Add this function to close the SSE connection when leaving the page
+window.addEventListener('beforeunload', function() {
+    if (eventSource) {
+        eventSource.close();
     }
-}
+});
 
-// Listen for HTMX after swap event
-document.body.addEventListener('htmx:afterSwap', updateCurrentStepFromHtmx);
-
-// Initialize currentStep on page load
-document.addEventListener('DOMContentLoaded', () => {
-    currentStep = getCurrentStep();
+// Initialize SSE connection when the page loads
+document.addEventListener('DOMContentLoaded', function() {
+    updateSSEConnection();
 });
 """
+
 
 @rt('/')
 def get():
@@ -674,11 +790,14 @@ def get():
                 # Training Progress Section
                 Div(
                     H3("Training Progress", cls="text-lg font-bold mb-2"),
-                    control_buttons(),                    
+                    control_buttons(visualizer.is_training),                    
                     Div(
-                        progress_tracker(0, "---", "---"),    
+                        progress_tracker(0, "---", "---"),       
                         id="training-content",
-                        cls="bg-white border-2 border-gray-300 rounded-lg shadow-lg p-4 mb-4 w-full flex flex-col items-stretch"),
+                        hx_ext="sse",
+                        sse_connect="/train_stream",
+                        sse_swap="step",
+                        cls="bg-white border-2 border-gray-300 rounded-lg shadow-lg p-4 mb-4 w-full flex flex-col items-stretch"),                    
                     id="training-section",
                     cls="mb-8"
                 ),
@@ -692,20 +811,20 @@ def get():
                 cls="w-full md:w-3/4"
             ),
             cls="flex flex-col md:flex-row gap-4 md:space-x-4 w-full max-w-6xl mx-auto"
-        ),
+        ),         
         Script(animation_script),
         cls="flex flex-col items-center p-4 min-h-screen bg-[#e0e8d8] text-black"
     )
 
-def control_buttons(is_playing=False):
+def control_buttons(is_training=False):
     return Div(
-        Button("Reset", id="reset-btn", hx_post="/reset", hx_target="#training-content", hx_swap="innerHTML",
+        Button("Reset", id="reset-btn", 
                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Reset"),
-        Button("Play", id="play-pause-btn",
-               cls="bg-green-500 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
+        Button("Pause" if is_training else "Play", id="play-pause-btn",
+               cls=f"{'bg-red-500' if is_training else 'bg-green-500'} hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full mr-2 transition duration-300 ease-in-out transform hover:scale-105", 
                title="Play/Pause"),
-        Button("Train Step", id="step-btn", hx_post="/train_step", hx_target="#training-content", hx_swap="innerHTML", hx_trigger="click",
+        Button("Train Step", id="step-btn",
                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105", 
                title="Train Step"),
         cls="flex justify-center space-x-4 mb-4"
@@ -812,20 +931,7 @@ class StepData(BaseModel):
     val_loss: str
 
 
-@rt('/get_step_batch')
-async def get(size: int = 20):
-    batch = []
-    for _ in range(size):
-        loss = visualizer.train_step()
-        batch.append({
-            'progress_tracker': {
-                'step_count': visualizer.step_count,
-                'train_loss': f"{visualizer.train_losses[-1]:.6f}" if visualizer.train_losses else "---",
-                'val_loss': f"{visualizer.val_losses[-1]:.6f}" if visualizer.val_losses else "---"
-            },
-            'graph_data': visualizer.get_graph_data()
-        })
-    return batch
+
 
 
 @rt('/generate_dataset')
@@ -923,17 +1029,11 @@ async def get():
 @rt('/reset')
 async def post():
     visualizer.reset()
-    return Div(
-        progress_tracker(0, "---", "---"),
-        Div(
-            P("Training progress reset. Click 'Train Step' or 'Play' to start training.", 
-              cls="text-gray-600"),
-            id="training-viz",
-            cls="w-full h-[450px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-8"
-        ),
-        id="training-content",
-        cls="w-full"
-    )
+    return {
+        'step_count': 0,
+        'train_loss': "---",
+        'val_loss': "---"
+    }
 
 # Run the app
 serve()
