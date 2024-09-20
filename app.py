@@ -545,7 +545,6 @@ async def get():
     return visualizer.get_training_status()
 
 
-
 @rt('/train_stream')
 async def get(request):
     async def event_stream():
@@ -558,9 +557,11 @@ async def get(request):
             if train or step:
                 visualizer.is_training = True
                 step_data = visualizer.train_step()
+                visualizer.is_training = False if step else True
+                yield f"event: step\ndata: {json.dumps(step_data)}\n\n"
                 if step:
                     visualizer.is_training = False
-                yield f"event: step\ndata: {json.dumps(step_data)}\n\n"
+                    break  # Exit the loop after a single step
                 await asyncio.sleep(0.3)  # 300ms delay between training steps
             else:
                 visualizer.is_training = False
@@ -706,16 +707,17 @@ function handlePlayPause() {
 
 function handleTrainStep() {
     if (!isTraining) {
-        if (eventSource) {
-            eventSource.close();
-        }
-        eventSource = new EventSource('/train_stream?step=true');
-        eventSource.addEventListener('step', function(e) {
-            const data = JSON.parse(e.data);
-            updateProgressTracker(data);
-            this.close();
-            updateSSEConnection();
-        });
+        fetch('/train_stream?step=true')
+            .then(response => response.text())
+            .then(text => {
+                const lines = text.split('\\n');
+                const eventData = lines.find(line => line.startsWith('data:'));
+                if (eventData) {
+                    const data = JSON.parse(eventData.slice(5));
+                    updateProgressTracker(data);
+                }
+            })
+            .catch(error => console.error('Error during single step:', error));
     }
 }
 
