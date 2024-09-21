@@ -12,12 +12,14 @@ import time
 
 tailwindLink = Link(rel="stylesheet", href="assets/output.css", type="text/css")
 sselink = Script(src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js")
+chartlink = Script(src="https://cdn.jsdelivr.net/npm/chart.js")
 app, rt = fast_app(
     pico=False,    
-    hdrs=(tailwindLink, sselink)
+    hdrs=(tailwindLink, sselink, chartlink)
 )
 
 setup_toasts(app)
+
 
 # -----------------------------------------------------------------------------
 # rng related
@@ -258,7 +260,7 @@ def cross_entropy(logits, target):
 
 
 # -----------------------------------------------------------------------------
-# The AdamW optimizer, same as PyTorch optim.AdamW
+# The AdamW optimizer, same as PyTorch optim.AdamW (https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html)
 
 class AdamW:
     def __init__(self, parameters, lr=1e-1, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0):
@@ -554,11 +556,13 @@ def progress_tracker(step_count, train_loss, val_loss):
     return Svg(
         Rect(x=0, y=0, width=600, height=50, fill="#f0f0f0", stroke="#000000"),
         Text(f"Step {step_count}/100", x=10, y=30, font_size="16", font_weight="bold", id="step-text"),
-        Text(f"Train loss: {train_loss:.6f}" if isinstance(train_loss, float) else f"Train loss: {train_loss}", x=150, y=30, font_size="14", id="train-loss-text"),
-        Text(f"Validation loss: {val_loss:.6f}" if isinstance(val_loss, float) else f"Validation loss: {val_loss}", x=350, y=30, font_size="14", id="val-loss-text"),
+        Text(f"Train loss: {train_loss:.6f}" if isinstance(train_loss, float) else f"Train loss: {train_loss}", x=150, y=30, font_size="14", id="train-loss-text", data_value=train_loss),
+        Text(f"Validation loss: {val_loss:.6f}" if isinstance(val_loss, float) else f"Validation loss: {val_loss}", x=350, y=30, font_size="14", id="val-loss-text", data_value=val_loss),
         width="100%", height="50",
         preserveAspectRatio="xMidYMid meet",
         viewBox="0 0 600 50",
+        id="progress-tracker",
+        hx_trigger="progressUpdate"
     )
 
 animation_script = """
@@ -647,18 +651,161 @@ function handleReset() {
             updatePlayPauseButton();
             updateSSEConnection();
             console.log(`Reset to step 0`);
+            resetChart();
         });
+            
 }
 
 function updateProgressTracker(data) {
     const stepText = document.getElementById('step-text');
     const trainLossText = document.getElementById('train-loss-text');
     const valLossText = document.getElementById('val-loss-text');
+    const chartContainer = document.getElementById('loss-chart-container');
 
     if (stepText) stepText.textContent = `Step ${data.step_count}/100`;
-    if (trainLossText) trainLossText.textContent = `Train loss: ${data.train_loss}`;
-    if (valLossText) valLossText.textContent = `Validation loss: ${data.val_loss}`;
+    if (trainLossText) {
+        trainLossText.textContent = `Train loss: ${data.train_loss}`;
+        trainLossText.dataset.value = data.train_loss;
+    }
+    if (valLossText) {
+        valLossText.textContent = `Validation loss: ${data.val_loss}`;
+        valLossText.dataset.value = data.val_loss;
+    }
+
+    // Show/hide chart based on step count
+    if (data.step_count > 0) {
+        chartContainer.classList.remove('hidden');
+        updateLossChart(data.step_count, parseFloat(data.train_loss), parseFloat(data.val_loss));
+    } else {
+        chartContainer.classList.add('hidden');
+    }
+
+    // Trigger a custom event
+    const event = new CustomEvent('progressUpdated', { detail: data });
+    document.dispatchEvent(event);
 }
+
+// Initialize loss chart
+ let lossChart;
+
+        function initChart() {
+            const ctx = document.getElementById('loss-chart');
+            if (ctx && !lossChart) {
+                lossChart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Training Loss',
+                            data: [],
+                            backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                            borderColor: 'rgb(75, 192, 192)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: 'Validation Loss',
+                            data: [],
+                            backgroundColor: 'rgba(255, 99, 132, 0.6)',
+                            borderColor: 'rgb(255, 99, 132)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                stacked: true,
+                                beginAtZero: true,
+                                position: 'top',
+                                title: {
+                                    display: true,
+                                    text: 'Loss',
+                                    padding: {top: 10, bottom: 0}
+                                }
+                            },
+                            y: {
+                                stacked: true,
+                                reverse: true,
+                                title: {
+                                    display: true,
+                                    text: 'Steps',
+                                    padding: {top: 0, left: 10, right: 10, bottom: 0}
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            annotation: {
+                                annotations: {
+                                    currentStep: {
+                                        type: 'line',
+                                        yMin: 0,
+                                        yMax: 0,
+                                        borderColor: 'rgb(255, 255, 0)',
+                                        borderWidth: 2
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function resetChart() {
+    if (lossChart) {
+        lossChart.data.labels = [];
+        lossChart.data.datasets[0].data = [];
+        lossChart.data.datasets[1].data = [];
+        lossChart.update();
+    }
+    
+    const chartContainer = document.getElementById('loss-chart-container');
+    if (chartContainer) {
+        chartContainer.classList.add('hidden');
+    }    
+}
+
+        function updateLossChart(stepCount, trainLoss, valLoss) {
+            const chartContainer = document.getElementById('loss-chart-container');
+            if (stepCount > 0) {
+                chartContainer.classList.remove('hidden');
+                if (lossChart) {
+                    const maxVisibleSteps = 25;
+                    
+                    lossChart.data.labels.push(stepCount);
+                    lossChart.data.datasets[0].data.push(trainLoss);
+                    lossChart.data.datasets[1].data.push(valLoss);
+                    
+                    if (lossChart.data.labels.length > maxVisibleSteps) {
+                        lossChart.data.labels = lossChart.data.labels.slice(-maxVisibleSteps);
+                        lossChart.data.datasets[0].data = lossChart.data.datasets[0].data.slice(-maxVisibleSteps);
+                        lossChart.data.datasets[1].data = lossChart.data.datasets[1].data.slice(-maxVisibleSteps);
+                    }
+                    
+                    lossChart.options.plugins.annotation.annotations.currentStep.yMin = lossChart.data.labels.length - 1;
+                    lossChart.options.plugins.annotation.annotations.currentStep.yMax = lossChart.data.labels.length - 1;
+                    
+                    lossChart.update();
+                }                                
+            } else {
+                chartContainer.classList.add('hidden');
+            }
+        }
+
+// Listen for SSE events
+document.body.addEventListener('htmx:sseMessage', function(evt) {
+    if (evt.detail.type === 'step') {
+        const data = JSON.parse(evt.detail.data);                
+        updateProgressTracker(data);
+    }
+});
+        
+       
 
 // Add event listeners
 document.getElementById('play-pause-btn').addEventListener('click', handlePlayPause);
@@ -675,6 +822,7 @@ window.addEventListener('beforeunload', function() {
 // Initialize SSE connection when the page loads
 document.addEventListener('DOMContentLoaded', function() {
     updateSSEConnection();
+    initChart();
 });
 """
 
@@ -700,6 +848,11 @@ def get():
                     id="dataset-content",
                     cls="overflow-x-auto"
                 ),
+                    Div(
+                    Canvas(id="loss-chart"),
+                    id="loss-chart-container",
+                    cls="w-full aspect-square bg-white border-2 border-gray-300 rounded-lg shadow-lg hidden"
+                ),                
                 id="dataset-section",
                 cls="w-full md:w-1/4 mb-4 md:mb-0"
             ),
@@ -768,6 +921,8 @@ def filter_buttons():
             cls="mt-1"
         ),
         # Explainer divs
+        Details(
+            Summary("Dataset Info", cls="text-lg font-bold cursor-pointer"),
         Div(
             P("The dataset is split into three parts to ensure robust model training and evaluation:"),
             P("Training set: 80 points (80%)", cls="font-semibold"),
@@ -801,7 +956,8 @@ def filter_buttons():
             id="explainer-test",
             cls="explainer",
             style="display: none;"
-        ),        
+        ),    
+        ),    
         id="filter-buttons",
         cls="p-4"
     )
@@ -878,20 +1034,22 @@ async def post():
             cls="aspect-square bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center mb-4"
         ),
         filter_buttons(),
-        Script("""
-        function filterDataPoints(event) {
-            const filter = event.target.value;
-            const dataPoints = document.querySelectorAll('.data-point');
-            dataPoints.forEach(point => {
-                point.style.opacity = (filter === 'all' || point.dataset.set === filter) ? '1' : '0.2';
-            });
-            
-            document.querySelectorAll('.explainer').forEach(el => el.style.display = 'none');
-            document.getElementById(`explainer-${filter}`).style.display = 'block';
-        }
-        // Trigger initial filter
-        document.querySelector('input[name="data-filter"]:checked').dispatchEvent(new Event('change'));
-        """),
+        Script("""     
+            resetChart();
+
+            function filterDataPoints(event) {
+                const filter = event.target.value;
+                const dataPoints = document.querySelectorAll('.data-point');
+                dataPoints.forEach(point => {
+                    point.style.opacity = (filter === 'all' || point.dataset.set === filter) ? '1' : '0.2';
+                });
+                
+                document.querySelectorAll('.explainer').forEach(el => el.style.display = 'none');
+                document.getElementById(`explainer-${filter}`).style.display = 'block';
+            }
+            // Trigger initial filter
+            document.querySelector('input[name="data-filter"]:checked').dispatchEvent(new Event('change'));
+            """),
         id="dataset-content",
         cls="w-full"
     )
@@ -946,6 +1104,306 @@ async def post():
         'train_loss': "---",
         'val_loss': "---"
     }
+
+
+@rt('/adamw')
+async def get():
+    return Titled("AdamW Optimizer Explainer",
+        Style("""
+            body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
+            h1, h2 { color: #333; }
+            pre { background-color: #f4f4f4; padding: 10px; border-radius: 5px; }
+            .math { font-style: italic; }
+        """),
+        Link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css", integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+", crossorigin="anonymous"),
+        Script(defer=True, src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js", integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg", crossorigin="anonymous"),
+        # Script(defer=True, src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js", integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk", crossorigin="anonymous", onload="renderMathInElement(document.body);"),
+        H2("1. Initialization"),
+        P("AdamW is initialized with the following parameters:"),
+        Ul(
+            Li(Span("lr", cls="math"), ": learning rate (default: 0.1)"),
+            Li(Span("β₁, β₂", cls="math"), ": exponential decay rates for moment estimates (default: 0.9, 0.95)"),
+            Li(Span("ε", cls="math"), ": small constant for numerical stability (default: 1e-8)"),
+            Li(Span("weight_decay", cls="math"), ": weight decay factor (default: 0.0)")
+        ),
+        P("For each parameter ", Span("p", cls="math"), ", we initialize:"),
+        Ul(
+            Li(Span("m = 0", cls="math"), " (first moment vector)"),
+            Li(Span("v = 0", cls="math"), " (second moment vector)")
+        ),
+        H2("2. Update Step"),
+        P("For each parameter ", Span("p", cls="math"), " and its gradient ", Span("g", cls="math"), ":"),
+        Ol(
+            Li("Update biased first moment estimate:", Br(),
+               Span("m = β₁ * m + (1 - β₁) * g", cls="math")),
+            Li("Update biased second raw moment estimate:", Br(),
+               Span("v = β₂ * v + (1 - β₂) * g²", cls="math")),
+            Li("Correct bias in first moment:", Br(),
+               Span("m̂ = m / (1 - β₁ᵗ)", cls="math")),
+            Li("Correct bias in second moment:", Br(),
+               Span("v̂ = v / (1 - β₂ᵗ)", cls="math")),
+            Li("Compute the parameter update:", Br(),
+               Span("Δp = -lr * (m̂ / (√v̂ + ε) + weight_decay * p)", cls="math")),
+            Li("Apply the update:", Br(),
+               Span("p = p + Δp", cls="math"))
+        ),
+        H2("3. Key Concepts"),
+        Ul(
+            Li(Strong("Adaptive Learning Rate"), ": The effective learning rate is adjusted based on the first and second moments of the gradients."),
+            Li(Strong("Momentum"), ": The first moment (m) provides a form of momentum, helping to smooth out updates."),
+            Li(Strong("RMSprop-like Scaling"), ": The second moment (v) scales the update, similar to RMSprop, helping to handle different magnitudes of gradients."),
+            Li(Strong("Bias Correction"), ": The bias correction terms (1 - β₁ᵗ and 1 - β₂ᵗ) help to reduce bias in the early steps of training."),
+            Li(Strong("Weight Decay"), ": Unlike standard Adam, AdamW applies weight decay directly to the parameters, which can improve generalization.")
+        ),
+        H2("4. Visualization"),
+        P("The optimizer state table in the main view shows:"),
+        Ul(
+            Li(Strong("param"), ": Current parameter value"),
+            Li(Strong("-m/sqrt(v)"), ": The main component of the update (before applying learning rate)"),
+            Li(Strong("grad"), ": Current gradient"),
+            Li(Strong("m"), ": First moment estimate"),
+            Li(Strong("sqrt(v)"), ": Square root of the second moment estimate")
+        ),
+        P("Green values are positive, red are negative, helping to visualize the direction of updates and gradient flow.")
+    )
+
+
+@rt('/model_info')
+def get(request: Request):
+    page = int(request.query_params.get('page', '1'))
+    model = visualizer.model
+    
+    # Calculate total number of parameters
+    total_params = sum(len(n.w) + 1 for layer in model.layers for n in layer.neurons)
+    
+    # Define page titles
+    page_titles = {
+        1: "Neural Network Structure",
+        2: "Parameter Dials"
+    }
+    
+    descriptions = {
+        1: {
+            "above": "This diagram shows the structure of our neural network. Each circle represents a neuron, and the lines represent connections between neurons.",
+            "below": "The network consists of an input layer, hidden layers, and an output layer. The number of neurons in each layer determines the network's capacity to learn complex patterns."
+        },
+        2: {
+            "above": f"This diagram shows the structure of the neural network. Total learnable parameters: {total_params}",
+            "below": "The position of each dial indicates the current value of the parameter. As training progresses, these dials will rotate to optimize the network's predictions."
+        },
+        3: {
+            "above": "This visualization shows the activation levels of neurons in our network. The brightness of each neuron indicates its level of activation.",
+            "below": "Observing these activations can help us understand which parts of the network are most responsive to different inputs, providing insights into the network's decision-making process."
+        }
+    }
+    # Get the appropriate SVG content based on the page
+    if page == 1:
+        svg_content = create_network_structure(model)
+        svg_element = Svg(*svg_content, 
+            width="100%", height="100%", 
+            viewBox="0 0 800 400",
+            preserveAspectRatio="xMidYMid meet",
+            cls="w-full aspect-[2/1] max-w-[800px] mx-auto sample-transition"),
+        svg_container = Div(svg_element, cls="w-full aspect-[2/1]") 
+    elif page == 2:
+        svg_content = create_parameter_dials(model)
+        svg_element = NotStr(svg_content) 
+        svg_container = Div(svg_element, cls="w-full aspect-[2/1]") 
+    else:
+        svg_container = Div() 
+
+    return Div(
+        H2(page_titles.get(page, "Unknown Page"), cls="text-2xl font-bold mb-4"),
+        P(descriptions[page]["above"], cls="text-lg mb-4"),
+        svg_container,
+        P(descriptions[page]["below"], cls="text-lg mt-4"),        
+        Div(
+            Button("Prev", 
+                   hx_get=f"/model_info?page={page-1}",
+                   hx_target="#model-info-container",
+                   hx_swap="innerHTML transition:true",
+                   cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded",
+                   disabled=page == 1),
+            Button("Next", 
+                   hx_get=f"/model_info?page={page+1}",
+                   hx_target="#model-info-container",
+                   hx_swap="innerHTML transition:true",
+                   cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded",
+                   disabled=page == 2),
+            cls="flex justify-between mt-4"
+        ),        
+        id="model-info-container",
+        cls="flex flex-col w-full max-w-4xl mx-auto p-4"
+    )
+
+def create_network_structure(model):
+    width = 800
+    height = 400
+    input_x = 50
+    output_x = width - 50
+    
+    svg_content = []
+    
+    input_size = len(model.layers[0].neurons[0].w)
+    hidden_layers = model.layers[:-1]
+    output_size = len(model.layers[-1].neurons)
+    layer_width = (output_x - input_x) / (len(hidden_layers) + 1)
+    
+    # Create edges first
+    for i in range(len(model.layers)):
+        start_x = input_x + i * layer_width
+        end_x = input_x + (i + 1) * layer_width
+        start_neurons = len(model.layers[i-1].neurons) if i > 0 else input_size
+        end_neurons = len(model.layers[i].neurons)
+        
+        for j in range(start_neurons):
+            for k in range(end_neurons):
+                y1 = (j + 1) * (height / (start_neurons + 1))
+                y2 = (k + 1) * (height / (end_neurons + 1))
+                svg_content.append(Line(x1=start_x, y1=y1, x2=end_x, y2=y2, stroke='#ccc'))
+    
+    # Create input layer shapes
+    for i in range(input_size):
+        y = (i + 1) * (height / (input_size + 1))
+        rect = Rect(width=40, height=40, x=-20, y=-20, fill='#6ab7ff')
+        g = G(rect, transform=f'translate({input_x}, {y})')
+        svg_content.append(g)
+    
+    # Create hidden layer shapes
+    for i, layer in enumerate(hidden_layers):
+        x = input_x + (i + 1) * layer_width
+        for j, neuron in enumerate(layer.neurons):
+            y = (j + 1) * (height / (len(layer.neurons) + 1))
+            circle = Circle(r=20, fill='#6aff9e')
+            g = G(circle, transform=f'translate({x}, {y})')
+            svg_content.append(g)
+    
+    # Create output layer shapes
+    for i in range(output_size):
+        y = (i + 1) * (height / (output_size + 1))
+        circle = Circle(r=20, fill='#ff9e6a')
+        g = G(circle, transform=f'translate({output_x}, {y})')
+        svg_content.append(g)
+    
+    # Create input layer text
+    for i in range(input_size):
+        y = (i + 1) * (height / (input_size + 1))
+        label = f'INPUT{i+1}'
+        text_bg = Rect(width=len(label)*7.5, height=18, x=input_x-len(label)*3.75, y=y-9, 
+                       fill='white', opacity=0.7, rx=3, ry=3)
+        text = Text(label, x=input_x, y=y+5, text_anchor='middle', font_size=12)
+        svg_content.append(G(text_bg, text))
+    
+    # Create hidden layer text
+    for i, layer in enumerate(hidden_layers):
+        x = input_x + (i + 1) * layer_width
+        for j, neuron in enumerate(layer.neurons):
+            y = (j + 1) * (height / (len(layer.neurons) + 1))
+            label = f'HIDDEN{j+1}'
+            text_bg = Rect(width=len(label)*7.5, height=18, x=x-len(label)*3.75, y=y-9, 
+                           fill='white', opacity=0.7, rx=3, ry=3)
+            text = Text(label, x=x, y=y+5, text_anchor='middle', font_size=12)
+            svg_content.append(G(text_bg, text))
+    
+    # Create output layer text
+    for i in range(output_size):
+        y = (i + 1) * (height / (output_size + 1))
+        label = f'OUTPUT{i+1}'
+        text_bg = Rect(width=len(label)*7.5, height=18, x=output_x-len(label)*3.75, y=y-9, 
+                       fill='white', opacity=0.7, rx=3, ry=3)
+        text = Text(label, x=output_x, y=y+5, text_anchor='middle', font_size=12)
+        svg_content.append(G(text_bg, text))
+    
+    return svg_content
+
+def create_parameter_dials(model):
+    svg_content = '<svg width="100%" height="100%" viewBox="0 0 800 400" preserveAspectRatio="xMidYMid meet">'
+    dial_size = 40
+    dial_gap = 20  # Increased gap between dials
+    
+    total_dials = sum(len(neuron.w) + 1 for layer in model.layers for neuron in layer.neurons)
+    
+    # Calculate the number of columns and rows that fit within the SVG
+    max_columns = (800 - dial_gap) // (dial_size + dial_gap)
+    max_rows = (400 - dial_gap) // (dial_size + dial_gap)
+    
+    columns = min(max_columns, total_dials)
+    rows = min(max_rows, math.ceil(total_dials / columns))
+    
+    # Recalculate columns if we exceed max_rows
+    if rows == max_rows:
+        columns = min(max_columns, math.ceil(total_dials / max_rows))
+    
+    grid_width = columns * (dial_size + dial_gap) - dial_gap
+    grid_height = rows * (dial_size + dial_gap) - dial_gap
+    
+    start_x = (800 - grid_width) / 2
+    start_y = (400 - grid_height) / 2
+    
+    # Add a background rectangle
+    svg_content += f'<rect x="0" y="0" width="800" height="400" fill="#f0f0f0"/>'
+    
+    # Group all dials
+    svg_content += f'<g transform="translate({start_x}, {start_y})">'
+    
+    param_index = 0
+    for layer in model.layers:
+        for neuron in layer.neurons:
+            for w in neuron.w:
+                if param_index >= columns * rows:
+                    break  # Stop if we've filled all available slots
+                
+                x = (param_index % columns) * (dial_size + dial_gap)
+                y = (param_index // columns) * (dial_size + dial_gap)
+                
+                normalized_data = max(min(w.data, 1), -1)
+                normalized_grad = max(min(w.grad, 1), -1)
+                
+                svg_content += create_dial(x, y, dial_size, normalized_data, normalized_grad, w.data)
+                
+                param_index += 1
+            
+            # Add bias dial
+            if param_index < columns * rows:
+                x = (param_index % columns) * (dial_size + dial_gap)
+                y = (param_index // columns) * (dial_size + dial_gap)
+                
+                normalized_data = max(min(neuron.b.data, 1), -1)
+                normalized_grad = max(min(neuron.b.grad, 1), -1)
+                
+                svg_content += create_dial(x, y, dial_size, normalized_data, normalized_grad, neuron.b.data)
+                
+                param_index += 1
+    
+    svg_content += '</g></svg>'
+    return svg_content
+
+def create_dial(x, y, size, normalized_data, normalized_grad, value):
+    dial = f'<g transform="translate({x}, {y})">'
+    
+    # Background circle
+    dial += f'<circle cx="{size/2}" cy="{size/2}" r="{size/2}" fill="white" stroke="#d0d0d0" stroke-width="1"/>'
+    
+    # Gradient arc
+    gradient_color = "#4CAF50" if normalized_grad > 0 else "#F44336"
+    end_angle = 180 + normalized_grad * 180
+    large_arc_flag = 1 if abs(normalized_grad) > 0.5 else 0
+    path = f"M{size/2},{size/2} L{size/2},0 A{size/2},{size/2} 0 {large_arc_flag},1 {size/2 + size/2*math.sin(math.radians(end_angle))},{size/2 - size/2*math.cos(math.radians(end_angle))} Z"
+    dial += f'<path d="{path}" fill="{gradient_color}" fill-opacity="0.3"/>'
+    
+    # Data indicator line
+    data_angle = 180 + normalized_data * 180
+    dial += f'<line x1="{size/2}" y1="{size/2}" x2="{size/2 + size/2*0.8*math.sin(math.radians(data_angle))}" y2="{size/2 - size/2*0.8*math.cos(math.radians(data_angle))}" stroke="black" stroke-width="2"/>'
+    
+    # Center dot
+    dial += f'<circle cx="{size/2}" cy="{size/2}" r="1" fill="black"/>'
+    
+    # Value text
+    dial += f'<text x="{size/2}" y="{size+10}" text-anchor="middle" font-size="{size/5}" fill="#333">{value:.2f}</text>'
+    
+    dial += '</g>'
+    return dial
+
 
 # Run the app
 serve()
