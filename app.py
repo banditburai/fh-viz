@@ -1404,9 +1404,8 @@ def create_dial(x, y, size, normalized_data, normalized_grad, value):
     dial += '</g>'
     return dial
 
-
 # ------------------------------------------------------------------------------------------
-# ----------------------------------------Parameter Dial------------------------------------
+# ----------------------------------------Dial--------------------------------------------
 # ------------------------------------------------------------------------------------------
 
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
@@ -1435,6 +1434,8 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     outer_radius = size / 2 - 5
     inner_radius = outer_radius - ring_width
     text_radius = (outer_radius + inner_radius) / 2
+    center = size / 2
+    std_dev = math.sqrt(v)
 
     def angle_to_coords(angle, radius):
         return size/2 + radius * math.cos(angle), size/2 + radius * math.sin(angle)
@@ -1447,6 +1448,100 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     knob_width, knob_length = ring_width, ring_width * 1.1
     knob_x, knob_y = angle_to_coords(knob_angle, outer_radius)
     knob_end_x, knob_end_y = angle_to_coords(knob_angle, outer_radius - knob_length)
+
+    
+    # Create the radio dial arc with mask (top semicircle only)    
+    radio_dial_arc = G(
+        Path(fill="none")
+            .M(center-inner_radius, center)
+            .A(inner_radius, inner_radius, 0, 1, 1, center+inner_radius, center),
+        Circle(r=inner_radius * 0.5, cx=center, cy=center, fill="white"),  # Mask (decreased to 0.5 to make grey area larger)
+        id="radio-dial-arc"
+    )
+
+    # Calculate the angles for m ± 0.5 std
+    std_dev = math.sqrt(v)
+    m_minus_half_std_angle = math.pi + ((m - 0.5 * std_dev) / std_dev * math.pi / 4) + math.pi/2
+    m_plus_half_std_angle = math.pi + ((m + 0.5 * std_dev) / std_dev * math.pi / 4) + math.pi/2
+
+    # Create the shaded area for 0.5 std around m (1 std total)
+    std_area = Path(fill="rgba(255, 192, 203, 0.5)")  # Light pink with 50% opacity
+    std_area.M(center + inner_radius * 0.5 * math.cos(m_minus_half_std_angle),
+            center + inner_radius * 0.5 * math.sin(m_minus_half_std_angle))
+    std_area.A(inner_radius * 0.5, inner_radius * 0.5, 0, 0, 1,
+            center + inner_radius * 0.5 * math.cos(m_plus_half_std_angle),
+            center + inner_radius * 0.5 * math.sin(m_plus_half_std_angle))
+    std_area.L(center + inner_radius * math.cos(m_plus_half_std_angle),
+            center + inner_radius * math.sin(m_plus_half_std_angle))
+    std_area.A(inner_radius, inner_radius, 0, 0, 0,
+            center + inner_radius * math.cos(m_minus_half_std_angle),
+            center + inner_radius * math.sin(m_minus_half_std_angle))
+    std_area.Z()
+
+    ticks = []
+    num_ticks = 21
+    for i in range(num_ticks):
+        angle = math.pi + (i / (num_ticks - 1)) * math.pi
+        inner_x = center + inner_radius * math.cos(angle)
+        inner_y = center + inner_radius * math.sin(angle)
+        outer_x = center + (inner_radius - ring_width/2) * math.cos(angle)
+        outer_y = center + (inner_radius - ring_width/2) * math.sin(angle)
+        ticks.append(
+            Line(x1=inner_x, y1=inner_y, x2=outer_x, y2=outer_y, 
+                 stroke="black", stroke_width=1, stroke_opacity=0.2)
+        )
+
+    # Create text labels for standard deviations (top semicircle only)
+    std_dev_labels = []
+    std_dev = math.sqrt(v)
+    label_values = [-2*std_dev, -std_dev, 0, std_dev, 2*std_dev]
+    label_radius = inner_radius * 0.65  # Adjusted from 0.75 to 0.65 to move labels closer to center
+    for i, value in enumerate(label_values):
+        angle = math.pi + (i / (len(label_values) - 1)) * math.pi
+        x = center + label_radius * math.cos(angle)
+        y = center + label_radius * math.sin(angle)
+        std_dev_labels.append(
+            Text(f"{value:.2f}", x=x, y=y, font_size=size/24, text_anchor="middle", dominant_baseline="middle")
+        )
+
+
+    # Calculate position for m indicator
+    m_in_std_dev = m / std_dev
+    m_angle = math.pi + (m_in_std_dev * math.pi / 4) + math.pi/2
+
+    # Create the m indicator line
+    m_indicator = Line(
+        x1=center + inner_radius * 0.5 * math.cos(m_angle),
+        y1=center + inner_radius * 0.5 * math.sin(m_angle),
+        x2=center + inner_radius * math.cos(m_angle),
+        y2=center + inner_radius * math.sin(m_angle),
+        stroke="red",
+        stroke_width=2
+    )
+
+    # Calculate position for m value text
+    m_text_radius = inner_radius * 0.35  # Adjust this value to position the text in the white area
+    m_text_x = center + m_text_radius * math.cos(m_angle)
+    m_text_y = center + m_text_radius * math.sin(m_angle)
+
+    # Create a path for the m value text to follow
+    m_text_path = (Path(id="m-value-path", fill="none")
+        .M(center-m_text_radius, center)
+        .A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
+    )
+
+    # Create the m value text
+    m_value_text = Text(
+        TextPath(
+            Tspan(f"{m:.4f}"),
+            href="#m-value-path",
+            startOffset=f"{(m_in_std_dev / 4 + 0.5) * 100}%"
+        ),
+        fill="red",
+        font_size=size/24,  # Adjusted for better fit
+        font_weight="bold",
+        text_anchor="middle"
+    )
 
     gradient_defs = {
         'low': (
@@ -1483,11 +1578,22 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
                     knob_end_y + knob_width/2 * math.cos(knob_angle))
                  .Z())
 
+    data_text = Text(
+        f"{data:.4f}",
+        x=size/2, y=size/2 + inner_radius/2.5,
+        font_family="Arial, sans-serif",
+        font_size=size/8,
+        font_weight="bold",
+        text_anchor="middle",
+        dominant_baseline="central",
+        fill="black"
+    )
+
     text_path = (Path(id="textPath", stroke="purple", stroke_width=2, fill="none")
                  .M(*angle_to_coords(math.radians(135), text_radius))
                  .A(text_radius, text_radius, 0, 0, 0,
                     *angle_to_coords(math.radians(45), text_radius)))
-
+    
     circle = partial(Circle, cx=size/2, cy=size/2)
 
     return Svg(
@@ -1502,24 +1608,24 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
                 FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"),
                 id="dropShadow",
             ),
-            text_path
+            text_path,
+            m_text_path,
         ),
         circle(r=outer_radius, fill="url(#dialGradient)", mask="url(#dialMask)"),
         G(
             circle(r=inner_radius, fill="white", stroke="none"),
+            radio_dial_arc,
             knob_path,
+            *ticks,
+            std_area,            
+            *std_dev_labels,            
+            
+            m_value_text,
+            m_indicator,            
+            data_text,
             filter="url(#dropShadow)"
-        ),
-        Text(
-            f"{data:.4f}",
-            x=size/2, y=size/2,
-            font_family="Arial, sans-serif",
-            font_size=size/8,
-            font_weight="bold",
-            text_anchor="middle",
-            dominant_baseline="central",
-            fill="black"
-        ),
+        ),        
+       
         Text(
             TextPath(
                 Tspan(f"{gradient:.4f}", dy="0.4em"),
@@ -1536,7 +1642,6 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
         id="parameter-dial"
     )
 
-    
 @rt('/parameter_dial')
 def get():
     random_data = random.uniform(-1, 1)
@@ -1578,10 +1683,11 @@ async def update_dial(request: Request):
 @rt('/hovering_gaussian')
 def get():    
     mean, std_dev = generate_gaussian_params()
+    size = 400
     return Div(
         H1("Hovering Gaussian", cls="text-center mb-4"),
         P(f"Mean: {mean:.4f}, StdDev: {std_dev:.4f}", id="gaussian-params", cls="text-center mb-4"),        
-        create_hovering_gaussian_svg(mean, std_dev),
+        create_hovering_gaussian_svg(mean, std_dev, size),
         id="gaussian-container",
         cls="container mx-auto px-4"
     )
@@ -1590,6 +1696,7 @@ def generate_gaussian_params():
     mean = random.uniform(-0.5, 0.5)
     std_dev = math.sqrt(random.uniform(0.1, 0.5))
     return mean, std_dev
+
 
 def create_hovering_gaussian_svg(mean, std_dev, size=400):
     gaussian_size = size * 0.375  # 150 / 400
