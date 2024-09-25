@@ -1408,6 +1408,7 @@ def create_dial(x, y, size, normalized_data, normalized_grad, value):
 # ----------------------------------------Dial--------------------------------------------
 # ------------------------------------------------------------------------------------------
 
+
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
     attributes = {
         'dx': dx,
@@ -1437,8 +1438,7 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     center = size / 2
     std_dev = math.sqrt(v)
 
-    def angle_to_coords(angle, radius):
-        return size/2 + radius * math.cos(angle), size/2 + radius * math.sin(angle)
+    angle_to_coords = lambda angle, radius: (center + radius * math.cos(angle), center + radius * math.sin(angle))
 
     start_angle, end_angle = map(math.radians, (135, 45))
     start_x, start_y = angle_to_coords(start_angle, outer_radius)
@@ -1455,53 +1455,40 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
         Path(fill="none")
             .M(center-inner_radius, center)
             .A(inner_radius, inner_radius, 0, 1, 1, center+inner_radius, center),
-        Circle(r=inner_radius * 0.5, cx=center, cy=center, fill="white"),  # Mask (decreased to 0.5 to make grey area larger)
+        Circle(r=inner_radius * 0.5, cx=center, cy=center, fill="white"),
         id="radio-dial-arc"
     )
 
-    # Calculate the angles for m ± 0.5 std
-    std_dev = math.sqrt(v)
     m_minus_half_std_angle = math.pi + ((m - 0.5 * std_dev) / std_dev * math.pi / 4) + math.pi/2
     m_plus_half_std_angle = math.pi + ((m + 0.5 * std_dev) / std_dev * math.pi / 4) + math.pi/2
 
-    # Create the shaded area for 0.5 std around m (1 std total)
-    std_area = Path(fill="rgba(255, 192, 203, 0.5)")  # Light pink with 50% opacity
-    std_area.M(center + inner_radius * 0.5 * math.cos(m_minus_half_std_angle),
-            center + inner_radius * 0.5 * math.sin(m_minus_half_std_angle))
-    std_area.A(inner_radius * 0.5, inner_radius * 0.5, 0, 0, 1,
-            center + inner_radius * 0.5 * math.cos(m_plus_half_std_angle),
-            center + inner_radius * 0.5 * math.sin(m_plus_half_std_angle))
-    std_area.L(center + inner_radius * math.cos(m_plus_half_std_angle),
-            center + inner_radius * math.sin(m_plus_half_std_angle))
-    std_area.A(inner_radius, inner_radius, 0, 0, 0,
-            center + inner_radius * math.cos(m_minus_half_std_angle),
-            center + inner_radius * math.sin(m_minus_half_std_angle))
+    std_area = Path(fill="rgba(255, 192, 203, 0.5)")
+    std_area.M(*angle_to_coords(m_minus_half_std_angle, inner_radius * 0.5))
+    std_area.A(inner_radius * 0.5, inner_radius * 0.5, 0, 0, 1, *angle_to_coords(m_plus_half_std_angle, inner_radius * 0.5))
+    std_area.L(*angle_to_coords(m_plus_half_std_angle, inner_radius))
+    std_area.A(inner_radius, inner_radius, 0, 0, 0, *angle_to_coords(m_minus_half_std_angle, inner_radius))
     std_area.Z()
 
-    ticks = []
-    num_ticks = 21
-    for i in range(num_ticks):
-        angle = math.pi + (i / (num_ticks - 1)) * math.pi
-        inner_x = center + inner_radius * math.cos(angle)
-        inner_y = center + inner_radius * math.sin(angle)
-        outer_x = center + (inner_radius - ring_width/2) * math.cos(angle)
-        outer_y = center + (inner_radius - ring_width/2) * math.sin(angle)
-        ticks.append(
-            Line(x1=inner_x, y1=inner_y, x2=outer_x, y2=outer_y, 
-                 stroke="black", stroke_width=1, stroke_opacity=0.2)
+    ticks = [
+        Line(
+            x1=center + inner_radius * math.cos(angle),
+            y1=center + inner_radius * math.sin(angle),
+            x2=center + (inner_radius - ring_width/2) * math.cos(angle),
+            y2=center + (inner_radius - ring_width/2) * math.sin(angle),
+            stroke="black", stroke_width=1, stroke_opacity=0.2
         )
+        for angle in (math.pi + (i / 20) * math.pi for i in range(21))
+    ]
 
     # Create text labels for standard deviations (top semicircle only)
     std_dev_labels = []
-    std_dev = math.sqrt(v)
     label_values = [-2*std_dev, -std_dev, 0, std_dev, 2*std_dev]
-    label_radius = inner_radius * 0.65  # Adjusted from 0.75 to 0.65 to move labels closer to center
+    label_radius = inner_radius * 0.65 
     for i, value in enumerate(label_values):
         angle = math.pi + (i / (len(label_values) - 1)) * math.pi
         x = center + label_radius * math.cos(angle)
         y = center + label_radius * math.sin(angle)
-        std_dev_labels.append(
-            Text(f"{value:.2f}", x=x, y=y, font_size=size/24, text_anchor="middle", dominant_baseline="middle")
+        std_dev_labels.append( Text(f"{value:.2f}", x=x, y=y, font_size=size/24, text_anchor="middle", dominant_baseline="middle")
         )
 
 
@@ -1511,48 +1498,28 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
 
     # Create the m indicator line
     m_indicator = Line(
-        x1=center + inner_radius * 0.5 * math.cos(m_angle),
-        y1=center + inner_radius * 0.5 * math.sin(m_angle),
-        x2=center + inner_radius * math.cos(m_angle),
-        y2=center + inner_radius * math.sin(m_angle),
-        stroke="red",
-        stroke_width=2
+        *angle_to_coords(m_angle, inner_radius * 0.5),
+        *angle_to_coords(m_angle, inner_radius),
+        stroke="red", stroke_width=2
     )
 
-    # Calculate position for m value text
-    m_text_radius = inner_radius * 0.35  # Adjust this value to position the text in the white area
-    m_text_x = center + m_text_radius * math.cos(m_angle)
-    m_text_y = center + m_text_radius * math.sin(m_angle)
+    m_text_radius = inner_radius * 0.35
+    m_text_path = Path(id="m-value-path", fill="none")
+    m_text_path.M(center-m_text_radius, center).A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
 
-    # Create a path for the m value text to follow
-    m_text_path = (Path(id="m-value-path", fill="none")
-        .M(center-m_text_radius, center)
-        .A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
-    )
-
-    # Create the m value text
     m_value_text = Text(
         TextPath(
             Tspan(f"{m:.4f}"),
             href="#m-value-path",
             startOffset=f"{(m_in_std_dev / 4 + 0.5) * 100}%"
         ),
-        fill="red",
-        font_size=size/24,  # Adjusted for better fit
-        font_weight="bold",
-        text_anchor="middle"
+        fill="red", font_size=size/24, font_weight="bold", text_anchor="middle"
     )
 
     gradient_defs = {
-        'low': (
-            "#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"
-        ),
-        'mid': (
-            "#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"
-        ),
-        'high': (
-            "#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d"
-        )
+        'low': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
+        'mid': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
+        'high': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
     }
 
     gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'
@@ -1562,67 +1529,40 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
         *[Stop(offset=f"{i/(len(gradient_defs[gradient_key])-1)*100}%", 
                style=f"stop-color:{color};stop-opacity:1")
           for i, color in enumerate(gradient_defs[gradient_key])],
-        id="dialGradient",
-        x1="0%", y1="0%", x2="100%", y2="100%",
+        id="dialGradient", x1="0%", y1="0%", x2="100%", y2="100%",
     )
 
-    mask_path = (Path(fill="black")
-                 .M(size/2, size/2).L(start_x, start_y)
-                 .A(outer_radius, outer_radius, 0, 1, 0, end_x, end_y).Z())
+    mask_path = Path(fill="black").M(size/2, size/2).L(start_x, start_y).A(outer_radius, outer_radius, 0, 1, 0, end_x, end_y).Z()
 
-    knob_path = (Path(fill="white")
-                 .M(knob_x, knob_y)
-                 .L(knob_end_x + knob_width/2 * math.sin(knob_angle),
-                    knob_end_y - knob_width/2 * math.cos(knob_angle))
-                 .L(knob_end_x - knob_width/2 * math.sin(knob_angle),
-                    knob_end_y + knob_width/2 * math.cos(knob_angle))
-                 .Z())
+    knob_path = Path(fill="white").M(knob_x, knob_y)
+    knob_path.L(knob_end_x + knob_width/2 * math.sin(knob_angle), knob_end_y - knob_width/2 * math.cos(knob_angle))
+    knob_path.L(knob_end_x - knob_width/2 * math.sin(knob_angle), knob_end_y + knob_width/2 * math.cos(knob_angle))
+    knob_path.Z()
 
     data_text = Text(
-        f"{data:.4f}",
-        x=size/2, y=size/2 + inner_radius/2.5,
-        font_family="Arial, sans-serif",
-        font_size=size/8,
-        font_weight="bold",
-        text_anchor="middle",
-        dominant_baseline="central",
-        fill="black"
+        f"{data:.4f}", x=size/2, y=size/2 + inner_radius/2.5,
+        font_family="Arial, sans-serif", font_size=size/8, font_weight="bold",
+        text_anchor="middle", dominant_baseline="central", fill="black"
     )
 
-    text_path = (Path(id="textPath", stroke="purple", stroke_width=2, fill="none")
-                 .M(*angle_to_coords(math.radians(135), text_radius))
-                 .A(text_radius, text_radius, 0, 0, 0,
-                    *angle_to_coords(math.radians(45), text_radius)))
-    
-    circle = partial(Circle, cx=size/2, cy=size/2)
+    text_path = Path(id="textPath", stroke="purple", stroke_width=2, fill="none")
+    text_path.M(*angle_to_coords(math.radians(135), text_radius))
+    text_path.A(text_radius, text_radius, 0, 0, 0, *angle_to_coords(math.radians(45), text_radius))
+
+    circle = partial(Circle, cx=center, cy=center)
 
     return Svg(
         Defs(
             gradient_def,
-            Mask(
-                Rect(x=0, y=0, width=size, height=size, fill="white"),
-                mask_path,
-                id="dialMask",
-            ),
-            Filter(
-                FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"),
-                id="dropShadow",
-            ),
-            text_path,
-            m_text_path,
+            Mask(Rect(x=0, y=0, width=size, height=size, fill="white"), mask_path, id="dialMask"),
+            Filter(FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"), id="dropShadow",),
+            text_path, m_text_path,
         ),
         circle(r=outer_radius, fill="url(#dialGradient)", mask="url(#dialMask)"),
         G(
             circle(r=inner_radius, fill="white", stroke="none"),
-            radio_dial_arc,
-            knob_path,
-            *ticks,
-            std_area,            
-            *std_dev_labels,            
-            
-            m_value_text,
-            m_indicator,            
-            data_text,
+            radio_dial_arc, knob_path, *ticks, std_area, *std_dev_labels,                        
+            m_value_text, m_indicator, data_text,
             filter="url(#dropShadow)"
         ),        
        
@@ -1630,13 +1570,9 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
             TextPath(
                 Tspan(f"{gradient:.4f}", dy="0.4em"),
                 Tspan(emoji, font_size=size/10, dy="0em"),
-                href="#textPath",
-                startOffset="50%",
+                href="#textPath", startOffset="50%",
             ),
-            font_family="Arial, sans-serif",
-            font_size=size/10,
-            text_anchor="middle",
-            fill="black"
+            font_family="Arial, sans-serif", font_size=size/10, text_anchor="middle", fill="black"
         ),
         width=size, height=size,
         id="parameter-dial"
