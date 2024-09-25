@@ -65,16 +65,6 @@ body {
     background-color: #2d3748;
 }
 
-/* #results {
-    max-width: 600px;
-    margin: 0 auto;
-}
-
-#results svg {
-    max-width: 100%;
-    height: auto;
-} */
-
 @keyframes fade-in {
     from { opacity: 0; }
 }

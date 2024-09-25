@@ -1107,7 +1107,7 @@ async def post():
 
 
 @rt('/adamw')
-async def get():
+async def get():    
     return Titled("AdamW Optimizer Explainer",
         Style("""
             body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
@@ -1164,7 +1164,7 @@ async def get():
             Li(Strong("m"), ": First moment estimate"),
             Li(Strong("sqrt(v)"), ": Square root of the second moment estimate")
         ),
-        P("Green values are positive, red are negative, helping to visualize the direction of updates and gradient flow.")
+        P("Green values are positive, red are negative, helping to visualize the direction of updates and gradient flow.")                 
     )
 
 
@@ -1406,7 +1406,7 @@ def create_dial(x, y, size, normalized_data, normalized_grad, value):
 
 
 # ------------------------------------------------------------------------------------------
-# ------------------------------------------------------------------------------------------
+# ----------------------------------------Parameter Dial------------------------------------
 # ------------------------------------------------------------------------------------------
 
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
@@ -1422,157 +1422,289 @@ def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=Non
     attributes.update(kwargs)
     return ft_hx('feDropShadow', **attributes)
 
-def create_parameter_dial(percentage=78, size=200):
+def normalize_gradient(gradient):
+    if gradient == 0:
+        return 50.0
+    sign = 1 if gradient > 0 else -1
+    return 50 + sign * 50 * (1 - math.exp(-abs(gradient))) / (1 + math.exp(-abs(gradient)))
+
+
+def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200):
+    percentage = normalize_gradient(gradient)
     ring_width = size / 8
     outer_radius = size / 2 - 5
     inner_radius = outer_radius - ring_width
+    text_radius = (outer_radius + inner_radius) / 2
 
-    def convert_percentage_to_angle(percentage):
-        start_angle = 135  # 0% at 135 degrees
-        end_angle = 45     # 100% at 45 degrees
-        return start_angle + (percentage / 100 * (end_angle - start_angle + 360)) % 360
+    def angle_to_coords(angle, radius):
+        return size/2 + radius * math.cos(angle), size/2 + radius * math.sin(angle)
 
-    # Calculate the points for the arc
-    start_angle = math.radians(135)  # 0% at 135 degrees
-    end_angle = math.radians(45)     # 100% at 45 degrees
-    start_x = size/2 + outer_radius * math.cos(start_angle)
-    start_y = size/2 + outer_radius * math.sin(start_angle)
-    end_x = size/2 + outer_radius * math.cos(end_angle)
-    end_y = size/2 + outer_radius * math.sin(end_angle)
+    start_angle, end_angle = map(math.radians, (135, 45))
+    start_x, start_y = angle_to_coords(start_angle, outer_radius)
+    end_x, end_y = angle_to_coords(end_angle, outer_radius)
 
-    # Calculate knob angle
-    knob_angle = math.radians(convert_percentage_to_angle(percentage))
-    knob_width = ring_width * 1
-    knob_length = ring_width * 1.1
-    knob_x = size/2 + outer_radius * math.cos(knob_angle)
-    knob_y = size/2 + outer_radius * math.sin(knob_angle)
-    knob_end_x = size/2 + (outer_radius - knob_length) * math.cos(knob_angle)
-    knob_end_y = size/2 + (outer_radius - knob_length) * math.sin(knob_angle)
+    knob_angle = math.radians(135 + (percentage / 100 * 270) % 360)
+    knob_width, knob_length = ring_width, ring_width * 1.1
+    knob_x, knob_y = angle_to_coords(knob_angle, outer_radius)
+    knob_end_x, knob_end_y = angle_to_coords(knob_angle, outer_radius - knob_length)
 
-    # Create the mask path
+    gradient_defs = {
+        'low': (
+            "#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"
+        ),
+        'mid': (
+            "#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"
+        ),
+        'high': (
+            "#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d"
+        )
+    }
+
+    gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'
+    emoji = {"low": "👇", "mid": "🙅‍♀️", "high": "👆"}[gradient_key]
+
+    gradient_def = LinearGradient(
+        *[Stop(offset=f"{i/(len(gradient_defs[gradient_key])-1)*100}%", 
+               style=f"stop-color:{color};stop-opacity:1")
+          for i, color in enumerate(gradient_defs[gradient_key])],
+        id="dialGradient",
+        x1="0%", y1="0%", x2="100%", y2="100%",
+    )
+
     mask_path = (Path(fill="black")
-                 .M(size/2, size/2)  # Start at center
-                 .L(start_x, start_y)  # Line to start of arc (0%)
-                 .A(outer_radius, outer_radius, 0, 1, 0, end_x, end_y)  # Arc to end (100%), clockwise
-                 .Z())  # Close path back to center
+                 .M(size/2, size/2).L(start_x, start_y)
+                 .A(outer_radius, outer_radius, 0, 1, 0, end_x, end_y).Z())
 
-    # Create the knob path
     knob_path = (Path(fill="white")
                  .M(knob_x, knob_y)
-                 .L(knob_end_x + knob_width/2 * math.sin(knob_angle), 
+                 .L(knob_end_x + knob_width/2 * math.sin(knob_angle),
                     knob_end_y - knob_width/2 * math.cos(knob_angle))
-                 .L(knob_end_x - knob_width/2 * math.sin(knob_angle), 
+                 .L(knob_end_x - knob_width/2 * math.sin(knob_angle),
                     knob_end_y + knob_width/2 * math.cos(knob_angle))
                  .Z())
 
+    text_path = (Path(id="textPath", stroke="purple", stroke_width=2, fill="none")
+                 .M(*angle_to_coords(math.radians(135), text_radius))
+                 .A(text_radius, text_radius, 0, 0, 0,
+                    *angle_to_coords(math.radians(45), text_radius)))
+
+    circle = partial(Circle, cx=size/2, cy=size/2)
+
     return Svg(
         Defs(
-            LinearGradient(
-                Stop(offset="0%", style="stop-color:#f7da40;stop-opacity:1"),
-                Stop(offset="100%", style="stop-color:#84c535;stop-opacity:1"),
-                id="dialGradient",
-                x1="0%", y1="50%", x2="100%", y2="50%",                
-            ),
-            Mask(                
+            gradient_def,
+            Mask(
                 Rect(x=0, y=0, width=size, height=size, fill="white"),
                 mask_path,
                 id="dialMask",
             ),
-          Filter(
+            Filter(
                 FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"),
                 id="dropShadow",
-            ),  
-        ),
-        # Gradient-filled circle with mask
-        Circle(
-            cx=size/2, cy=size/2, r=outer_radius,
-            fill="url(#dialGradient)",
-            mask="url(#dialMask)"
-        ),
-        # Group for inner circle and knob with combined drop shadow
-        G(
-            # Inner white circle
-            Circle(
-                cx=size/2, cy=size/2, r=inner_radius,
-                fill="white", stroke="none",
             ),
-            # Knob 
-            knob_path,                            
+            text_path
+        ),
+        circle(r=outer_radius, fill="url(#dialGradient)", mask="url(#dialMask)"),
+        G(
+            circle(r=inner_radius, fill="white", stroke="none"),
+            knob_path,
             filter="url(#dropShadow)"
         ),
-        # Percentage text
         Text(
-            f"{percentage}%",
+            f"{data:.4f}",
             x=size/2, y=size/2,
             font_family="Arial, sans-serif",
-            font_size=size/6,
+            font_size=size/8,
             font_weight="bold",
             text_anchor="middle",
             dominant_baseline="central",
             fill="black"
         ),
-        # 0% marker (temporary)
-        Line(x1=size/2, y1=size/2, x2=start_x, y2=start_y, stroke="red", stroke_width=2),
-        Text("0%", x=start_x-30, y=start_y+10, fill="red", font_size=12),
-        # 100% marker (temporary)
-        Line(x1=size/2, y1=size/2, x2=end_x, y2=end_y, stroke="blue", stroke_width=2),
-        Text("100%", x=end_x+10, y=end_y+10, fill="blue", font_size=12),
-        width=size, height=size
+        Text(
+            TextPath(
+                Tspan(f"{gradient:.4f}", dy="0.4em"),
+                Tspan(emoji, font_size=size/10, dy="0em"),
+                href="#textPath",
+                startOffset="50%",
+            ),
+            font_family="Arial, sans-serif",
+            font_size=size/10,
+            text_anchor="middle",
+            fill="black"
+        ),
+        width=size, height=size,
+        id="parameter-dial"
     )
 
+    
 @rt('/parameter_dial')
 def get():
+    random_data = random.uniform(-1, 1)
+    random_m = random.uniform(-0.5, 0.5)
+    random_v = random.uniform(0.5, 1.5)    
     return Div(
-        create_parameter_dial(),
-        style="background-color: #f0f0f0; padding: 20px;"
+        Div(
+            Span("Select Gradient: ", cls="mr-2 font-bold"),
+            Div(
+                *[Label(
+                    Input(type="radio", name="gradient", value=value, 
+                          hx_post="/update-dial", hx_trigger="change", hx_target="#parameter-dial", hx_swap="outerHTML",
+                          checked=(value == "0.0000"), cls="radio-input"),
+                    Span(cls="radio-circle"),
+                    label,
+                    cls="radio-item"
+                ) for value, label in [("-3.0000", "Low (<0)"), ("0.0000", "Mid (0)"), ("1.0000", "High (>0)")]], 
+                cls="radio-group"
+            ),
+            cls="mt-1 mb-4"
+        ),
+        create_parameter_dial(data=random_data, gradient=0.0000, m=random_m, v=random_v),
+        cls="p-6 rounded-lg shadow-md mx-auto min-h-screen bg-[#e0e8d8] text-black"
     )
 
+@rt("/update-dial")
+async def update_dial(request: Request):
+    form = await request.form()
+    gradient = float(form.get("gradient", 0))
+    random_data = random.uniform(-1, 1)
+    random_m = random.uniform(-0.5, 0.5)
+    random_v = random.uniform(0.5, 1.5)
+    return create_parameter_dial(data=random_data, gradient=gradient)
 
-def create_clippath_visual(size=200):
-    outer_radius = size / 2 - 5
+# ------------------------------------------------------------------------------------------
+# ----------------------------------------Gaussian------------------------------------------
+# ------------------------------------------------------------------------------------------
 
-    # Correct angle calculations
-    start_angle = math.radians(45)  # 5pm position (45 degrees)
-    end_angle = math.radians(135)   # 7pm position (135 degrees)
-    start_x = size/2 + outer_radius * math.cos(start_angle)
-    start_y = size/2 + outer_radius * math.sin(start_angle)
-    end_x = size/2 + outer_radius * math.cos(end_angle)
-    end_y = size/2 + outer_radius * math.sin(end_angle)
-
-    # Create the clip path
-    clip_path = (Path(fill="red", fill_opacity="0.3", stroke="red", stroke_width=2)
-                 .M(size/2, size/2)  # Start at center
-                 .L(start_x, start_y)  # Line to start of arc
-                 .A(outer_radius, outer_radius, 0, 0, 1, end_x, end_y)  # Arc
-                 .Z())  # Close path back to center
-
-    return Svg(
-        # Full square outline
-        Rect(
-            x=0, y=0, width=size, height=size,
-            fill="none", stroke="blue", stroke_width="2"
-        ),
-        # Full circle for reference
-        Circle(
-            cx=size/2, cy=size/2, r=outer_radius,
-            fill="none", stroke="green", stroke_width="1"
-        ),
-        # Clip path shape
-        clip_path,
-        # Center point
-        Circle(cx=size/2, cy=size/2, r=3, fill="green"),
-        # Start point
-        Circle(cx=start_x, cy=start_y, r=3, fill="blue"),
-        # End point
-        Circle(cx=end_x, cy=end_y, r=3, fill="purple"),
-        width=size, height=size
-    )
-
-@rt('/clippath_visual')
-def get():
+@rt('/hovering_gaussian')
+def get():    
+    mean, std_dev = generate_gaussian_params()
     return Div(
-        create_clippath_visual(),
-        style="background-color: #f0f0f0; padding: 20px;"
+        H1("Hovering Gaussian", cls="text-center mb-4"),
+        P(f"Mean: {mean:.4f}, StdDev: {std_dev:.4f}", id="gaussian-params", cls="text-center mb-4"),        
+        create_hovering_gaussian_svg(mean, std_dev),
+        id="gaussian-container",
+        cls="container mx-auto px-4"
     )
+
+def generate_gaussian_params():
+    mean = random.uniform(-0.5, 0.5)
+    std_dev = math.sqrt(random.uniform(0.1, 0.5))
+    return mean, std_dev
+
+def create_hovering_gaussian_svg(mean, std_dev, size=400):
+    gaussian_size = size * 0.375  # 150 / 400
+    center = size // 2
+    radial_segments, circular_segments = 40, 60
+
+    # Create radial grid points
+    points = [
+        [(i / (radial_segments - 1))**2 * math.cos(angle), 
+         (i / (radial_segments - 1))**2 * math.sin(angle)]
+        for i in range(radial_segments)
+        for angle in (2 * math.pi * j / circular_segments for j in range(circular_segments))
+    ]
+
+    # Create lines for the grid
+    lines = [
+        Line(0, 0, 0, 0, stroke="black", stroke_width=1, id=f"line_{i}")
+        for i in range(radial_segments * circular_segments)
+    ]
+
+    # Create SVG content
+    svg_content = Svg(
+        G(*lines, id="gaussian"),
+        width="100%", height="100%",
+        viewBox=f"0 0 {size} {size}",
+        preserveAspectRatio="xMidYMid meet",
+        style="background-color: #f0f0f0; max-width: 100%; height: auto;"
+    )
+    
+    gaussian_new_script = f"""
+        const gaussianSize = {gaussian_size};
+        const center = {center};
+        const radialSegments = {radial_segments};
+        const circularSegments = {circular_segments};
+        window.mean = {mean};
+        window.stdDev = {std_dev};
+
+        const points = {json.dumps(points)};
+        let is3D = false;
+        let transitionProgress = 0;
+
+        function gaussian(x, y, stdDev) {{
+            const r = Math.sqrt(x*x + y*y);
+            return Math.exp(-(r*r) / (2 * stdDev*stdDev));
+        }}
+
+        function rotatePoint(point, angleX, angleY) {{
+            let [x, y, z] = point;
+            const cosX = Math.cos(angleX), sinX = Math.sin(angleX);
+            const cosY = Math.cos(angleY), sinY = Math.sin(angleY);
+            
+            const y1 = y * cosX - z * sinX;
+            const z1 = y * sinX + z * cosX;
+            
+            return [
+                x * cosY + z1 * sinY,
+                y1,
+                -x * sinY + z1 * cosY
+            ];
+        }}
+
+        function updateGaussian() {{
+            const time = performance.now() / 1000;
+            const angleX = Math.sin(time * 0.3) * Math.PI / 12;
+            const angleY = Math.sin(time * 0.4) * Math.PI / 8;
+            const hoverOffset = Math.sin(time * 1.5) * 5;
+
+            const rotatedPoints = points.map(p => {{
+                const z = gaussian(p[0], p[1], window.stdDev) * transitionProgress;
+                return rotatePoint([p[0], p[1], z], angleX * transitionProgress, angleY * transitionProgress);
+            }});
+
+            // Update grid lines
+            for (let i = 0; i < radialSegments; i++) {{
+                for (let j = 0; j < circularSegments; j++) {{
+                    const lineIndex = i * circularSegments + j;
+                    const line = document.getElementById(`line_${{lineIndex}}`);
+                    if (line) {{
+                        const start = rotatedPoints[lineIndex];
+                        const endIndex = (j === circularSegments - 1) ? i * circularSegments : lineIndex + 1;
+                        const end = rotatedPoints[endIndex];
+
+                        line.setAttribute('x1', start[0] * gaussianSize + center);
+                        line.setAttribute('y1', -start[2] * gaussianSize + center + hoverOffset * transitionProgress);
+                        line.setAttribute('x2', end[0] * gaussianSize + center);
+                        line.setAttribute('y2', -end[2] * gaussianSize + center + hoverOffset * transitionProgress);
+                    }}
+                }}
+            }}
+
+            if (is3D && transitionProgress < 1) {{
+                transitionProgress += 0.02;
+                if (transitionProgress > 1) transitionProgress = 1;
+            }} else if (!is3D && transitionProgress > 0) {{
+                transitionProgress -= 0.02;
+                if (transitionProgress < 0) transitionProgress = 0;
+            }}
+
+            requestAnimationFrame(updateGaussian);
+        }}
+
+        function toggleView() {{
+            is3D = !is3D;
+        }}
+
+        updateGaussian();
+
+        document.getElementById('gaussian-container').addEventListener('click', toggleView);
+    """
+
+    return Div(
+        svg_content,
+        Script(gaussian_new_script),
+        cls="w-full max-w-md mx-auto aspect-square"
+    )
+
 # Run the app
 serve()
