@@ -1428,17 +1428,39 @@ def normalize_gradient(gradient):
     sign = 1 if gradient > 0 else -1
     return 50 + sign * 50 * (1 - math.exp(-abs(gradient))) / (1 + math.exp(-abs(gradient)))
 
+# def symmetric_log_scale(x, linthresh=0.01):
+#     return math.copysign(math.log1p(abs(x) / linthresh), x) if abs(x) > linthresh else x / linthresh
 
-def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200):
+# def inverse_symmetric_log_scale(y, linthresh=0.01):
+#     return math.copysign(linthresh * (math.exp(abs(y)) - 1), y) if abs(y) > 1 else y * linthresh
+
+def symlog_scale(x, linthresh=0.01):
+    return math.copysign(math.log1p(abs(x) / linthresh), x)
+
+def inv_symlog_scale(y, linthresh=0.01):
+    return math.copysign(linthresh * (math.exp(abs(y)) - 1), y)
+
+
+def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200):    
+    std_dev = math.sqrt(v)
+    print("std_dev", std_dev)
     percentage = normalize_gradient(gradient)
     ring_width = size / 8
     outer_radius = size / 2 - 5
     inner_radius = outer_radius - ring_width
     text_radius = (outer_radius + inner_radius) / 2
     center = size / 2
-    std_dev = math.sqrt(v)
+       
+    log_scale = lambda x: symlog_scale(x, linthresh=0.01)
+    inv_log_scale = lambda x: inv_symlog_scale(x, linthresh=0.01)
 
     angle_to_coords = lambda angle, radius: (center + radius * math.cos(angle), center + radius * math.sin(angle))
+
+    # Update the scale to use logarithmic values
+    scale_min, scale_max = -1.0, 1.0
+    log_scale_min, log_scale_max = log_scale(scale_min), log_scale(scale_max)
+    
+    pos_to_angle = lambda pos: math.pi + (log_scale(pos) - log_scale_min) / (log_scale_max - log_scale_min) * math.pi
 
     start_angle, end_angle = map(math.radians, (135, 45))
     start_x, start_y = angle_to_coords(start_angle, outer_radius)
@@ -1449,7 +1471,6 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     knob_x, knob_y = angle_to_coords(knob_angle, outer_radius)
     knob_end_x, knob_end_y = angle_to_coords(knob_angle, outer_radius - knob_length)
 
-    
     # Create the radio dial arc with mask (top semicircle only)    
     radio_dial_arc = G(
         Path(fill="none")
@@ -1459,59 +1480,75 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
         id="radio-dial-arc"
     )
 
-    m_minus_half_std_angle = math.pi + ((m - 0.5 * std_dev) / std_dev * math.pi / 4) + math.pi/2
-    m_plus_half_std_angle = math.pi + ((m + 0.5 * std_dev) / std_dev * math.pi / 4) + math.pi/2
+    # Calculate standard deviation area
+    std_start = max(scale_min, m - std_dev)
+    std_end = min(scale_max, m + std_dev)
+    std_area_start_angle = pos_to_angle(std_start)
+    std_area_end_angle = pos_to_angle(std_end)
 
     std_area = Path(fill="rgba(255, 192, 203, 0.5)")
-    std_area.M(*angle_to_coords(m_minus_half_std_angle, inner_radius * 0.5))
-    std_area.A(inner_radius * 0.5, inner_radius * 0.5, 0, 0, 1, *angle_to_coords(m_plus_half_std_angle, inner_radius * 0.5))
-    std_area.L(*angle_to_coords(m_plus_half_std_angle, inner_radius))
-    std_area.A(inner_radius, inner_radius, 0, 0, 0, *angle_to_coords(m_minus_half_std_angle, inner_radius))
+    std_area.M(*angle_to_coords(std_area_start_angle, inner_radius * 0.5))
+    std_area.A(inner_radius * 0.5, inner_radius * 0.5, 0, 0, 1, 
+               *angle_to_coords(std_area_end_angle, inner_radius * 0.5))
+    std_area.L(*angle_to_coords(std_area_end_angle, inner_radius))
+    std_area.A(inner_radius, inner_radius, 0, 0, 0, 
+               *angle_to_coords(std_area_start_angle, inner_radius))
     std_area.Z()
+    
 
-    ticks = [
-        Line(
-            x1=center + inner_radius * math.cos(angle),
-            y1=center + inner_radius * math.sin(angle),
-            x2=center + (inner_radius - ring_width/2) * math.cos(angle),
-            y2=center + (inner_radius - ring_width/2) * math.sin(angle),
-            stroke="black", stroke_width=1, stroke_opacity=0.2
-        )
-        for angle in (math.pi + (i / 20) * math.pi for i in range(21))
+    # Create text labels for standard deviations (top semicircle only)    
+    label_values = [
+        scale_min,
+        scale_min / 5,
+        scale_min / 50,
+        0,
+        scale_max / 50,
+        scale_max / 5,
+        scale_max
     ]
-
-    # Create text labels for standard deviations (top semicircle only)
-    std_dev_labels = []
-    label_values = [-2*std_dev, -std_dev, 0, std_dev, 2*std_dev]
+    
+    # Create labels with correct positioning
     label_radius = inner_radius * 0.65 
+    std_dev_labels = []
     for i, value in enumerate(label_values):
         angle = math.pi + (i / (len(label_values) - 1)) * math.pi
         x = center + label_radius * math.cos(angle)
         y = center + label_radius * math.sin(angle)
-        std_dev_labels.append( Text(f"{value:.2f}", x=x, y=y, font_size=size/24, text_anchor="middle", dominant_baseline="middle")
+        std_dev_labels.append(Text(f"{value:.2f}", x=x, y=y, font_size=size/24, text_anchor="middle", dominant_baseline="middle"))
+
+    ticks = [
+        Line(
+            *angle_to_coords(math.pi + (i / (len(label_values) - 1)) * math.pi, inner_radius),
+            *angle_to_coords(math.pi + (i / (len(label_values) - 1)) * math.pi, inner_radius - ring_width/2),
+            stroke="black", stroke_width=1, stroke_opacity=0.2
         )
+        for i in range(len(label_values))
+    ]
 
-
-    # Calculate position for m indicator
-    m_in_std_dev = m / std_dev
-    m_angle = math.pi + (m_in_std_dev * math.pi / 4) + math.pi/2
-
-    # Create the m indicator line
+    # Update m indicator position
+    m_angle = pos_to_angle(m)
     m_indicator = Line(
         *angle_to_coords(m_angle, inner_radius * 0.5),
         *angle_to_coords(m_angle, inner_radius),
         stroke="red", stroke_width=2
     )
 
+    # Create the m text path
     m_text_radius = inner_radius * 0.35
     m_text_path = Path(id="m-value-path", fill="none")
     m_text_path.M(center-m_text_radius, center).A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
 
+    m_normalized = (log_scale(m) - log_scale_min) / (log_scale_max - log_scale_min)
+    
+    # Adjust the range to prevent cut-off
+    text_margin = 0.2
+    m_adjusted = text_margin + m_normalized * (1 - 2 * text_margin)
+    
     m_value_text = Text(
         TextPath(
             Tspan(f"{m:.4f}"),
             href="#m-value-path",
-            startOffset=f"{(m_in_std_dev / 4 + 0.5) * 100}%"
+            startOffset=f"{m_adjusted * 100}%"
         ),
         fill="red", font_size=size/24, font_weight="bold", text_anchor="middle"
     )
@@ -1539,6 +1576,34 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     knob_path.L(knob_end_x - knob_width/2 * math.sin(knob_angle), knob_end_y + knob_width/2 * math.cos(knob_angle))
     knob_path.Z()
 
+    # Calculate z = m/sqrt(v)
+    z = m / math.sqrt(v)
+    z_color = "#4CAF50" if z > 0 else "#F44336"
+    z_triangle = "▲" if z > 0 else "▼"
+
+    # Create rounded rectangle for z-value background
+    rect_width, rect_height = size * 0.4, size * 0.07
+    rect_x = size / 2 - rect_width / 2
+    rect_y = size / 2 + inner_radius / 1.8
+
+    rect_attrs = dict(
+        x=rect_x, y=rect_y,
+        width=rect_width, height=rect_height,
+        rx=rect_height / 2
+    )
+
+    z_background = Rect(fill=z_color, **rect_attrs, opacity=0.8)
+
+    z_text = Text(
+        f"{z_triangle} {abs(z):.4f}",
+        x=size / 2, y=rect_y + rect_height / 2,
+        font_family="Arial, sans-serif", font_size=size / 16, font_weight="bold",
+        text_anchor="middle", dominant_baseline="central", fill="white"
+    )
+
+    # Create a cutout effect
+    z_cutout = Rect(fill="white", mask="url(#z-text-mask)", **rect_attrs)
+
     data_text = Text(
         f"{data:.4f}", x=size/2, y=size/2 + inner_radius/2.5,
         font_family="Arial, sans-serif", font_size=size/8, font_weight="bold",
@@ -1557,12 +1622,22 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
             Mask(Rect(x=0, y=0, width=size, height=size, fill="white"), mask_path, id="dialMask"),
             Filter(FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"), id="dropShadow",),
             text_path, m_text_path,
+            Mask(                
+                Rect(fill="black", **rect_attrs),
+                Text(
+                    f"{z_triangle} {abs(z):.4f}",
+                    x=size/2, y=rect_y + rect_height/2,
+                    font_family="Arial, sans-serif", font_size=size/18, font_weight="bold",
+                    text_anchor="middle", dominant_baseline="central", fill="white"
+                ),
+                id="z-text-mask",
+            )            
         ),
         circle(r=outer_radius, fill="url(#dialGradient)", mask="url(#dialMask)"),
         G(
             circle(r=inner_radius, fill="white", stroke="none"),
             radio_dial_arc, knob_path, *ticks, std_area, *std_dev_labels,                        
-            m_value_text, m_indicator, data_text,
+            m_value_text, m_indicator, data_text, z_background, z_cutout,
             filter="url(#dropShadow)"
         ),        
        
@@ -1581,8 +1656,8 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
 @rt('/parameter_dial')
 def get():
     random_data = random.uniform(-1, 1)
-    random_m = random.uniform(-0.5, 0.5)
-    random_v = random.uniform(0.5, 1.5)    
+    random_m = random.uniform(-0.02, 0.02)
+    random_v = random.uniform(0.003, 0.03)   
     return Div(
         Div(
             Span("Select Gradient: ", cls="mr-2 font-bold"),
