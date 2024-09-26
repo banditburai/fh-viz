@@ -1422,17 +1422,13 @@ def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=Non
     attributes.update(kwargs)
     return ft_hx('feDropShadow', **attributes)
 
-def normalize_gradient(gradient):
-    if gradient == 0:
-        return 50.0
-    sign = 1 if gradient > 0 else -1
-    return 50 + sign * 50 * (1 - math.exp(-abs(gradient))) / (1 + math.exp(-abs(gradient)))
+# def normalize_gradient(gradient):
+#     if gradient == 0:
+#         return 50.0
+#     sign = 1 if gradient > 0 else -1
+#     return 50 + sign * 50 * (1 - math.exp(-abs(gradient))) / (1 + math.exp(-abs(gradient)))
 
-# def symmetric_log_scale(x, linthresh=0.01):
-#     return math.copysign(math.log1p(abs(x) / linthresh), x) if abs(x) > linthresh else x / linthresh
 
-# def inverse_symmetric_log_scale(y, linthresh=0.01):
-#     return math.copysign(linthresh * (math.exp(abs(y)) - 1), y) if abs(y) > 1 else y * linthresh
 
 def symlog_scale(x, linthresh=0.01):
     return math.copysign(math.log1p(abs(x) / linthresh), x)
@@ -1440,10 +1436,16 @@ def symlog_scale(x, linthresh=0.01):
 def inv_symlog_scale(y, linthresh=0.01):
     return math.copysign(linthresh * (math.exp(abs(y)) - 1), y)
 
+def normalize_gradient(gradient, scale_min=-1, scale_max=1, linthresh=0.01):
+    log_gradient = symlog_scale(gradient, linthresh)
+    log_min = symlog_scale(scale_min, linthresh)
+    log_max = symlog_scale(scale_max, linthresh)
+    return (log_gradient - log_min) / (log_max - log_min) * 100
+
+
 
 def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200):    
     std_dev = math.sqrt(v)
-    print("std_dev", std_dev)
     percentage = normalize_gradient(gradient)
     ring_width = size / 8
     outer_radius = size / 2 - 5
@@ -1451,22 +1453,20 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     text_radius = (outer_radius + inner_radius) / 2
     center = size / 2
        
-    log_scale = lambda x: symlog_scale(x, linthresh=0.01)
-    inv_log_scale = lambda x: inv_symlog_scale(x, linthresh=0.01)
-
+    scale_min, scale_max = -1.0, 1.0
+    linthresh = 0.01
+    log_scale_min, log_scale_max = symlog_scale(scale_min, linthresh), symlog_scale(scale_max, linthresh)
+    
+    def pos_to_angle(pos):
+        return math.pi + (symlog_scale(pos, linthresh) - log_scale_min) / (log_scale_max - log_scale_min) * math.pi
+    
     angle_to_coords = lambda angle, radius: (center + radius * math.cos(angle), center + radius * math.sin(angle))
 
-    # Update the scale to use logarithmic values
-    scale_min, scale_max = -1.0, 1.0
-    log_scale_min, log_scale_max = log_scale(scale_min), log_scale(scale_max)
-    
-    pos_to_angle = lambda pos: math.pi + (log_scale(pos) - log_scale_min) / (log_scale_max - log_scale_min) * math.pi
-
-    start_angle, end_angle = map(math.radians, (135, 45))
+    start_angle, end_angle = math.radians(135), math.radians(45)
     start_x, start_y = angle_to_coords(start_angle, outer_radius)
     end_x, end_y = angle_to_coords(end_angle, outer_radius)
-
-    knob_angle = math.radians(135 + (percentage / 100 * 270) % 360)
+    
+    knob_angle = math.radians(180 + percentage * 1.8)        
     knob_width, knob_length = ring_width, ring_width * 1.1
     knob_x, knob_y = angle_to_coords(knob_angle, outer_radius)
     knob_end_x, knob_end_y = angle_to_coords(knob_angle, outer_radius - knob_length)
@@ -1495,26 +1495,22 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
                *angle_to_coords(std_area_start_angle, inner_radius))
     std_area.Z()
     
-
-    # Create text labels for standard deviations (top semicircle only)    
-    label_values = [
-        scale_min,
-        scale_min / 5,
-        scale_min / 50,
-        0,
-        scale_max / 50,
-        scale_max / 5,
-        scale_max
-    ]
     
     # Create labels with correct positioning
     label_radius = inner_radius * 0.65 
-    std_dev_labels = []
-    for i, value in enumerate(label_values):
-        angle = math.pi + (i / (len(label_values) - 1)) * math.pi
-        x = center + label_radius * math.cos(angle)
-        y = center + label_radius * math.sin(angle)
-        std_dev_labels.append(Text(f"{value:.2f}", x=x, y=y, font_size=size/24, text_anchor="middle", dominant_baseline="middle"))
+    label_values = [scale_min, scale_min/5, scale_min/50, 0, scale_max/50, scale_max/5, scale_max]
+    
+    std_dev_labels = [
+        Text(
+            f"{value:.2f}",
+            x=center + label_radius * math.cos(math.pi + (i / (len(label_values) - 1)) * math.pi),
+            y=center + label_radius * math.sin(math.pi + (i / (len(label_values) - 1)) * math.pi),
+            font_size=size/24,
+            text_anchor="middle",
+            dominant_baseline="middle"
+        )
+        for i, value in enumerate(label_values)
+    ]
 
     ticks = [
         Line(
@@ -1538,8 +1534,9 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     m_text_path = Path(id="m-value-path", fill="none")
     m_text_path.M(center-m_text_radius, center).A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
 
-    m_normalized = (log_scale(m) - log_scale_min) / (log_scale_max - log_scale_min)
-    
+
+    m_normalized = (symlog_scale(m, linthresh) - log_scale_min) / (log_scale_max - log_scale_min)
+
     # Adjust the range to prevent cut-off
     text_margin = 0.2
     m_adjusted = text_margin + m_normalized * (1 - 2 * text_margin)
@@ -1669,7 +1666,7 @@ def get():
                     Span(cls="radio-circle"),
                     label,
                     cls="radio-item"
-                ) for value, label in [("-3.0000", "Low (<0)"), ("0.0000", "Mid (0)"), ("1.0000", "High (>0)")]], 
+                ) for value, label in [("-0.8000", "Low (<0)"), ("0.0000", "Mid (0)"), (".0100", "High (>0)")]], 
                 cls="radio-group"
             ),
             cls="mt-1 mb-4"
