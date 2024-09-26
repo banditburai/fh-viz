@@ -1422,14 +1422,6 @@ def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=Non
     attributes.update(kwargs)
     return ft_hx('feDropShadow', **attributes)
 
-# def normalize_gradient(gradient):
-#     if gradient == 0:
-#         return 50.0
-#     sign = 1 if gradient > 0 else -1
-#     return 50 + sign * 50 * (1 - math.exp(-abs(gradient))) / (1 + math.exp(-abs(gradient)))
-
-
-
 def symlog_scale(x, linthresh=0.01):
     return math.copysign(math.log1p(abs(x) / linthresh), x)
 
@@ -1442,9 +1434,7 @@ def normalize_gradient(gradient, scale_min=-1, scale_max=1, linthresh=0.01):
     log_max = symlog_scale(scale_max, linthresh)
     return (log_gradient - log_min) / (log_max - log_min) * 100
 
-
-
-def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200):    
+def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9, size=200):    
     std_dev = math.sqrt(v)
     percentage = normalize_gradient(gradient)
     ring_width = size / 8
@@ -1462,9 +1452,10 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
     
     angle_to_coords = lambda angle, radius: (center + radius * math.cos(angle), center + radius * math.sin(angle))
 
-    start_angle, end_angle = math.radians(135), math.radians(45)
-    start_x, start_y = angle_to_coords(start_angle, outer_radius)
-    end_x, end_y = angle_to_coords(end_angle, outer_radius)
+    START_ANGLE = math.radians(135)
+    END_ANGLE = math.radians(45)
+    start_x, start_y = angle_to_coords(START_ANGLE, outer_radius)
+    end_x, end_y = angle_to_coords(END_ANGLE, outer_radius)
     
     knob_angle = math.radians(180 + percentage * 1.8)        
     knob_width, knob_length = ring_width, ring_width * 1.1
@@ -1523,17 +1514,85 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
 
     # Update m indicator position
     m_angle = pos_to_angle(m)
+    arrow_start_x, arrow_start_y = angle_to_coords(m_angle, inner_radius)
     m_indicator = Line(
         *angle_to_coords(m_angle, inner_radius * 0.5),
         *angle_to_coords(m_angle, inner_radius),
         stroke="red", stroke_width=2
     )
 
+    # Calculate arrow length based on the magnitude of the gradient
+    # We'll use (1 - beta1) as a scaling factor to represent the update magnitude in AdamW
+    arrow_length = abs(gradient) * (1 - beta1) * (outer_radius - inner_radius)
+    
+    # Ensure the arrow doesn't exceed a maximum length
+    max_arrow_length = (outer_radius - inner_radius) * 0.5
+    arrow_length = min(arrow_length, max_arrow_length)
+    
+    def create_arrow_path(center_x, center_y, outer_radius, inner_radius, m, gradient, scale_min, scale_max, max_gradient):
+        # Calculate angle for m
+        m_angle = pos_to_angle(m)
+        
+        # Use inner_radius for the blue arc
+        arc_radius = inner_radius * 0.9
+        
+        # Calculate start point (m position)
+        start_x = center_x + arc_radius * math.cos(m_angle)
+        start_y = center_y + arc_radius * math.sin(m_angle)
+        
+        # Calculate end point based on gradient
+        gradient_length = (gradient / max_gradient) * (math.pi / 2)
+        
+        # Implement minimum size for the arrow
+        min_angle = math.radians(2)  # Minimum 2 degrees
+        if abs(gradient_length) < min_angle:
+            gradient_length = min_angle if gradient >= 0 else -min_angle
+        
+        end_angle = m_angle + gradient_length
+        end_x = center_x + arc_radius * math.cos(end_angle)
+        end_y = center_y + arc_radius * math.sin(end_angle)
+        
+        # Don't draw the arrow if gradient is zero
+        if gradient == 0:
+            return None
+        
+        arrow_path = Path(stroke="blue", stroke_width=2, fill="blue")
+        arrow_path.M(start_x, start_y)
+        arrow_path.A(arc_radius, arc_radius, 0, 0, 1 if gradient > 0 else 0, end_x, end_y)
+        
+        # Calculate arrow properties based on gradient
+        arrow_scale = min(abs(gradient) / max_gradient, 1)  # Scale factor based on gradient magnitude
+        base_arrow_length = size / 20
+        base_arrow_width = size / 60
+        
+        arrow_length = base_arrow_length * (0.5 + 0.5 * arrow_scale)  # Scale length, but keep a minimum size
+        arrow_width = base_arrow_width * (0.5 + 0.5 * arrow_scale)  # Scale width, but keep a minimum size
+        
+        angle = math.atan2(end_y - start_y, end_x - start_x)
+        
+        # Calculate the points for the arrowhead
+        tip_x, tip_y = end_x, end_y
+        left_x = end_x - arrow_length * math.cos(angle) + arrow_width * math.sin(angle)
+        left_y = end_y - arrow_length * math.sin(angle) - arrow_width * math.cos(angle)
+        right_x = end_x - arrow_length * math.cos(angle) - arrow_width * math.sin(angle)
+        right_y = end_y - arrow_length * math.sin(angle) + arrow_width * math.cos(angle)
+        
+        # Draw the arrowhead
+        arrow_path.M(tip_x, tip_y)
+        arrow_path.L(left_x, left_y)
+        arrow_path.L(right_x, right_y)
+        arrow_path.Z()
+        
+        return arrow_path
+    
+    max_gradient = 5.0
+
+    blue_arrow = create_arrow_path(center, center, outer_radius, inner_radius, m, gradient, scale_min, scale_max, max_gradient)
+
     # Create the m text path
     m_text_radius = inner_radius * 0.35
     m_text_path = Path(id="m-value-path", fill="none")
     m_text_path.M(center-m_text_radius, center).A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
-
 
     m_normalized = (symlog_scale(m, linthresh) - log_scale_min) / (log_scale_max - log_scale_min)
 
@@ -1634,7 +1693,7 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, size=200)
         G(
             circle(r=inner_radius, fill="white", stroke="none"),
             radio_dial_arc, knob_path, *ticks, std_area, *std_dev_labels,                        
-            m_value_text, m_indicator, data_text, z_background, z_cutout,
+            m_value_text, m_indicator, data_text, z_background, z_cutout, blue_arrow,
             filter="url(#dropShadow)"
         ),        
        
