@@ -1461,8 +1461,7 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     knob_width, knob_length = ring_width, ring_width * 1.1
     knob_x, knob_y = angle_to_coords(knob_angle, outer_radius)
     knob_end_x, knob_end_y = angle_to_coords(knob_angle, outer_radius - knob_length)
-
-    # Create the radio dial arc with mask (top semicircle only)    
+     
     radio_dial_arc = G(
         Path(fill="none")
             .M(center-inner_radius, center)
@@ -1470,8 +1469,7 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
         Circle(r=inner_radius * 0.5, cx=center, cy=center, fill="white"),
         id="radio-dial-arc"
     )
-
-    # Calculate standard deviation area
+    
     std_start = max(scale_min, m - std_dev)
     std_end = min(scale_max, m + std_dev)
     std_area_start_angle = pos_to_angle(std_start)
@@ -1486,8 +1484,6 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
                *angle_to_coords(std_area_start_angle, inner_radius))
     std_area.Z()
     
-    
-    # Create labels with correct positioning
     label_radius = inner_radius * 0.65 
     label_values = [scale_min, scale_min/5, scale_min/50, 0, scale_max/50, scale_max/5, scale_max]
     
@@ -1511,8 +1507,7 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
         )
         for i in range(len(label_values))
     ]
-
-    # Update m indicator position
+    
     m_angle = pos_to_angle(m)
     arrow_start_x, arrow_start_y = angle_to_coords(m_angle, inner_radius)
     m_indicator = Line(
@@ -1522,55 +1517,33 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     )
 
     # Calculate arrow length based on the magnitude of the gradient
-    # We'll use (1 - beta1) as a scaling factor to represent the update magnitude in AdamW
-    arrow_length = abs(gradient) * (1 - beta1) * (outer_radius - inner_radius)
-    
-    # Ensure the arrow doesn't exceed a maximum length
+    arrow_length = abs(gradient) * (1 - beta1) * (outer_radius - inner_radius)        
     max_arrow_length = (outer_radius - inner_radius) * 0.5
     arrow_length = min(arrow_length, max_arrow_length)
     
-    def create_arrow_path(center_x, center_y, outer_radius, inner_radius, m, gradient, scale_min, scale_max, max_gradient):
-        # Calculate angle for m
-        m_angle = pos_to_angle(m)
-        
-        # Use inner_radius for the blue arc
-        arc_radius = inner_radius * 0.9
-        
-        # Calculate start point (m position)
+    def create_arrow_path(center_x, center_y, outer_radius, inner_radius, m, gradient, scale_min, scale_max, max_gradient):        
+        m_angle = pos_to_angle(m)                
+        arc_radius = inner_radius * 0.9                
         start_x = center_x + arc_radius * math.cos(m_angle)
-        start_y = center_y + arc_radius * math.sin(m_angle)
-        
-        # Calculate end point based on gradient
-        gradient_length = (gradient / max_gradient) * (math.pi / 2)
-        
-        # Implement minimum size for the arrow
+        start_y = center_y + arc_radius * math.sin(m_angle)        
+        gradient_length = (gradient / max_gradient) * (math.pi / 2)                
         min_angle = math.radians(2)  # Minimum 2 degrees
         if abs(gradient_length) < min_angle:
-            gradient_length = min_angle if gradient >= 0 else -min_angle
-        
+            gradient_length = min_angle if gradient >= 0 else -min_angle        
         end_angle = m_angle + gradient_length
         end_x = center_x + arc_radius * math.cos(end_angle)
         end_y = center_y + arc_radius * math.sin(end_angle)
-        
-        # Don't draw the arrow if gradient is zero
         if gradient == 0:
-            return None
-        
+            return None        
         arrow_path = Path(stroke="blue", stroke_width=2, fill="blue")
         arrow_path.M(start_x, start_y)
-        arrow_path.A(arc_radius, arc_radius, 0, 0, 1 if gradient > 0 else 0, end_x, end_y)
-        
-        # Calculate arrow properties based on gradient
-        arrow_scale = min(abs(gradient) / max_gradient, 1)  # Scale factor based on gradient magnitude
+        arrow_path.A(arc_radius, arc_radius, 0, 0, 1 if gradient > 0 else 0, end_x, end_y)        
+        arrow_scale = min(abs(gradient) / max_gradient, 1) 
         base_arrow_length = size / 20
-        base_arrow_width = size / 60
-        
-        arrow_length = base_arrow_length * (0.5 + 0.5 * arrow_scale)  # Scale length, but keep a minimum size
-        arrow_width = base_arrow_width * (0.5 + 0.5 * arrow_scale)  # Scale width, but keep a minimum size
-        
-        angle = math.atan2(end_y - start_y, end_x - start_x)
-        
-        # Calculate the points for the arrowhead
+        base_arrow_width = size / 60        
+        arrow_length = base_arrow_length * (0.5 + 0.5 * arrow_scale)  
+        arrow_width = base_arrow_width * (0.5 + 0.5 * arrow_scale) 
+        angle = math.atan2(end_y - start_y, end_x - start_x)                
         tip_x, tip_y = end_x, end_y
         left_x = end_x - arrow_length * math.cos(angle) + arrow_width * math.sin(angle)
         left_y = end_y - arrow_length * math.sin(angle) - arrow_width * math.cos(angle)
@@ -1586,18 +1559,14 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
         return arrow_path
     
     max_gradient = 5.0
-
     blue_arrow = create_arrow_path(center, center, outer_radius, inner_radius, m, gradient, scale_min, scale_max, max_gradient)
-
-    # Create the m text path
+    
     m_text_radius = inner_radius * 0.35
     m_text_path = Path(id="m-value-path", fill="none")
     m_text_path.M(center-m_text_radius, center).A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
 
-    m_normalized = (symlog_scale(m, linthresh) - log_scale_min) / (log_scale_max - log_scale_min)
-
-    # Adjust the range to prevent cut-off
-    text_margin = 0.2
+    m_normalized = (symlog_scale(m, linthresh) - log_scale_min) / (log_scale_max - log_scale_min)    
+    text_margin = 0.2 # Adjust the range to prevent cut-off
     m_adjusted = text_margin + m_normalized * (1 - 2 * text_margin)
     
     m_value_text = Text(
@@ -1616,7 +1585,7 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     }
 
     gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'
-    emoji = {"low": "👇", "mid": "🙅‍♀️", "high": "👆"}[gradient_key]
+    # emoji = {"low": "👇", "mid": "🙅‍♀️", "high": "👆"}[gradient_key]
 
     gradient_def = LinearGradient(
         *[Stop(offset=f"{i/(len(gradient_defs[gradient_key])-1)*100}%", 
@@ -1700,7 +1669,7 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
         Text(
             TextPath(
                 Tspan(f"{gradient:.4f}", dy="0.4em"),
-                Tspan(emoji, font_size=size/10, dy="0em"),
+                # Tspan(emoji, font_size=size/10, dy="0em"),
                 href="#textPath", startOffset="50%",
             ),
             font_family="Arial, sans-serif", font_size=size/10, text_anchor="middle", fill="black"
@@ -1725,7 +1694,7 @@ def get():
                     Span(cls="radio-circle"),
                     label,
                     cls="radio-item"
-                ) for value, label in [("-0.8000", "Low (<0)"), ("0.0000", "Mid (0)"), (".0100", "High (>0)")]], 
+                ) for value, label in [("-3.0000", "Low (<0)"), ("0.0000", "Mid (0)"), ("1.0000", "High (>0)")]], 
                 cls="radio-group"
             ),
             cls="mt-1 mb-4"
@@ -1738,10 +1707,19 @@ def get():
 async def update_dial(request: Request):
     form = await request.form()
     gradient = float(form.get("gradient", 0))
+        
+    if gradient < 0:  # Low
+        m = random.uniform(-0.5, -0.1)
+        v = random.uniform(0.01, 0.1)
+    elif gradient > 0:  # High
+        m = random.uniform(0.1, 0.5)
+        v = random.uniform(0.01, 0.1)
+    else:  # Mid
+        m = random.uniform(-0.1, 0.1)
+        v = random.uniform(0.001, 0.01)
+    
     random_data = random.uniform(-1, 1)
-    random_m = random.uniform(-0.5, 0.5)
-    random_v = random.uniform(0.5, 1.5)
-    return create_parameter_dial(data=random_data, gradient=gradient)
+    return create_parameter_dial(data=random_data, gradient=gradient, m=m, v=v)
 
 # ------------------------------------------------------------------------------------------
 # ----------------------------------------Gaussian------------------------------------------
