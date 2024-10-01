@@ -1463,31 +1463,26 @@ def create_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angl
         path.Z()
         return path
 
-def create_upward_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angle, end_angle):
+def create_upward_bean_shape(x, y, width, height):
     path = Path(fill="#4a90e2", opacity=0.8)  # Blue color for sqrt(v)
     
-    # Inner arc (now the upper part)
-    path.M(center_x + inner_radius * math.cos(start_angle), 
-           center_y + inner_radius * math.sin(start_angle))
-    path.A(inner_radius, inner_radius, 0, 0, 1, 
-           center_x + inner_radius * math.cos(end_angle), 
-           center_y + inner_radius * math.sin(end_angle))
+    # Calculate control points for smoother curves
+    ctrl_offset = height * 0.8  # Adjust this value to change the curvature
     
-    # Right edge (small curve)
-    edge_radius = (outer_radius - inner_radius) / 2
-    path.A(edge_radius, edge_radius, 0, 0, 1,
-           center_x + outer_radius * math.cos(end_angle),
-           center_y + outer_radius * math.sin(end_angle))
+    # Start at the bottom-left corner
+    path.M(x, y + height)
     
-    # Outer arc (now the lower part)
-    path.A(outer_radius, outer_radius, 0, 0, 0,
-           center_x + outer_radius * math.cos(start_angle),
-           center_y + outer_radius * math.sin(start_angle))
+    # Bottom curve (convex)
+    path.Q(x + width/2, y + height + ctrl_offset, x + width, y + height)
     
-    # Left edge (small curve)
-    path.A(edge_radius, edge_radius, 0, 0, 1,
-           center_x + inner_radius * math.cos(start_angle),
-           center_y + inner_radius * math.sin(start_angle))
+    # Right side (straight)
+    path.L(x + width, y)
+    
+    # Top curve (convex, matching bottom curve)
+    path.Q(x + width/2, y - ctrl_offset, x, y)
+    
+    # Left side (straight)
+    path.L(x, y + height)
     
     path.Z()
     return path
@@ -1563,8 +1558,8 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     inner_v_radius = outer_m_radius * 0.6 
     m_text_radius = (outer_m_radius + inner_v_radius) * .5
         
-    m_circle = Circle(cx=center, cy=center, r=outer_m_radius, fill="none", stroke="#888", stroke_width=1)    
-    v_circle = Circle(cx=center, cy=center, r=inner_v_radius, fill="none", stroke="#888", stroke_width=1)
+    m_circle = Circle(cx=center, cy=center, r=outer_m_radius, fill="none", stroke="#888", stroke_width=1, mask=f"url(#top-half-mask)")    
+    v_circle = Circle(cx=center, cy=center, r=inner_v_radius, fill="none", stroke="#888", stroke_width=1, mask=f"url(#top-half-mask)")
     
     m_ticks = []
     m_labels = []
@@ -1653,8 +1648,8 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     m_indicator = Line(
         x1=center,
         y1=center,
-        x2=angle_to_coords(m_angle, outer_m_radius * 1.1)[0],
-        y2=angle_to_coords(m_angle, outer_m_radius * 1.1)[1],
+        x2=angle_to_coords(m_angle, outer_m_radius * 1.15)[0],
+        y2=angle_to_coords(m_angle, outer_m_radius * 1.15)[1],
         stroke="#372572", stroke_width=2
     )
     center_circle = Circle(
@@ -1708,23 +1703,29 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     
     max_gradient = 5.0
     blue_arrow = create_arrow_path(center, center, outer_radius, inner_radius, m, gradient, scale_min, scale_max, max_gradient)
-        
-    sqrt_v_shape = Rect(
-        x=size/2 - size*0.15/2,
-        y=size/2 + size/70,
-        width=size*0.15,
-        height=size*0.05,
-        rx=(size*0.05)/2,  # rounded corners
-        fill="#4a90e2",
-        opacity=0.8
-    )
 
+    sqrt_v_width = size * 0.15
+    sqrt_v_height = size * 0.05
+    sqrt_v_x = size/2 - sqrt_v_width/2
+    sqrt_v_y = size/2 + size/70
+
+    # Create the convex bean shape
+    sqrt_v_shape = create_upward_bean_shape(sqrt_v_x, sqrt_v_y, sqrt_v_width, sqrt_v_height)
+
+    # Create the text path for sqrt(v)        
+    sqrt_v_text_path = Path(id="sqrt-v-text-path", fill="none")
+    sqrt_v_text_path.M(sqrt_v_x, sqrt_v_y + sqrt_v_height/2)
+    sqrt_v_text_path.Q(sqrt_v_x + sqrt_v_width/2, sqrt_v_y + sqrt_v_height + sqrt_v_height/2, 
+                    sqrt_v_x + sqrt_v_width, sqrt_v_y + sqrt_v_height/2)
+
+    # Create the shape with cutout text
     sqrt_v_shape, sqrt_v_mask = create_shape_with_cutout_text(
         sqrt_v_shape,
         f"{sqrt_v:.4f}",
-        size/26
+        size/30,  # Adjust font size as needed
+        text_path_id="sqrt-v-text-path"
     )
-  
+ 
     gradient_defs = {
         'low': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
         'mid': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
@@ -1791,8 +1792,12 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
         Defs(
             gradient_def,
             Mask(Rect(x=0, y=0, width=size, height=size, fill="white"), mask_path, id="dialMask"),
+            Mask(Rect(x=0, y=0, width=size, height=size, fill="white"),
+                 Rect(x=0, y=center, width=size, height=center, fill="black"),
+                 id="top-half-mask"
+                 ),
             Filter(FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"), id="dropShadow",),
-            text_path, m_text_path,
+            text_path, m_text_path, sqrt_v_text_path,
             Mask(                
                 Rect(fill="black", **rect_attrs),
                 Text(
@@ -1810,9 +1815,9 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
         G(
             circle(r=inner_radius, fill="white", stroke="none"),
             m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,
-            m_shape, m_indicator, center_circle, blue_arrow,
+            m_shape, blue_arrow,
             sqrt_v_shape, data_text, z_background, z_cutout,                                                      
-            
+            m_indicator, center_circle,
             filter="url(#dropShadow)"
         ),        
        
