@@ -1434,8 +1434,103 @@ def normalize_gradient(gradient, scale_min=-1, scale_max=1, linthresh=0.01):
     log_max = symlog_scale(scale_max, linthresh)
     return (log_gradient - log_min) / (log_max - log_min) * 100
 
-def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9, size=200):    
-    std_dev = math.sqrt(v)
+def create_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angle, end_angle):
+        path = Path(fill="#372572", opacity=0.8)
+        
+        # Outer arc
+        path.M(center_x + outer_radius * math.cos(start_angle), 
+               center_y + outer_radius * math.sin(start_angle))
+        path.A(outer_radius, outer_radius, 0, 0, 1, 
+               center_x + outer_radius * math.cos(end_angle), 
+               center_y + outer_radius * math.sin(end_angle))
+        
+        # Right edge (small curve)
+        edge_radius = (outer_radius - inner_radius) / 2
+        path.A(edge_radius, edge_radius, 0, 0, 1,
+               center_x + inner_radius * math.cos(end_angle),
+               center_y + inner_radius * math.sin(end_angle))
+        
+        # Inner arc
+        path.A(inner_radius, inner_radius, 0, 0, 0,
+               center_x + inner_radius * math.cos(start_angle),
+               center_y + inner_radius * math.sin(start_angle))
+        
+        # Left edge (small curve)
+        path.A(edge_radius, edge_radius, 0, 0, 1,
+               center_x + outer_radius * math.cos(start_angle),
+               center_y + outer_radius * math.sin(start_angle))
+        
+        path.Z()
+        return path
+
+def create_upward_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angle, end_angle):
+    path = Path(fill="#4a90e2", opacity=0.8)  # Blue color for sqrt(v)
+    
+    # Inner arc (now the upper part)
+    path.M(center_x + inner_radius * math.cos(start_angle), 
+           center_y + inner_radius * math.sin(start_angle))
+    path.A(inner_radius, inner_radius, 0, 0, 1, 
+           center_x + inner_radius * math.cos(end_angle), 
+           center_y + inner_radius * math.sin(end_angle))
+    
+    # Right edge (small curve)
+    edge_radius = (outer_radius - inner_radius) / 2
+    path.A(edge_radius, edge_radius, 0, 0, 1,
+           center_x + outer_radius * math.cos(end_angle),
+           center_y + outer_radius * math.sin(end_angle))
+    
+    # Outer arc (now the lower part)
+    path.A(outer_radius, outer_radius, 0, 0, 0,
+           center_x + outer_radius * math.cos(start_angle),
+           center_y + outer_radius * math.sin(start_angle))
+    
+    # Left edge (small curve)
+    path.A(edge_radius, edge_radius, 0, 0, 1,
+           center_x + inner_radius * math.cos(start_angle),
+           center_y + inner_radius * math.sin(start_angle))
+    
+    path.Z()
+    return path
+
+def create_shape_with_cutout_text(shape, text, font_size, text_path_id=None):
+    shape_id = f"shape-{text.replace('.', '-')}"
+    mask_id = f"mask-{text.replace('.', '-')}"
+    
+    if text_path_id:
+        text_element = Text(
+            TextPath(
+                text,
+                href=f"#{text_path_id}",
+                startOffset="50%"
+            ),
+            font_family="Arial, sans-serif",
+            font_size=font_size,
+            font_weight="bold",
+            fill="black",
+            text_anchor="middle",
+            dominant_baseline="central"
+        )
+    else:
+        text_element = Text(
+            text,
+            x=shape.x + shape.width/2 if hasattr(shape, 'width') else shape.cx,
+            y=shape.y + shape.height/2 if hasattr(shape, 'height') else shape.cy,
+            font_family="Arial, sans-serif", font_size=font_size, font_weight="bold",
+            text_anchor="middle", dominant_baseline="central", fill="black"
+        )
+
+    mask = Mask(
+        Rect(x=0, y=0, width="100%", height="100%", fill="white"),  # Changed to white
+        text_element,
+        id=mask_id
+    )
+
+    shape.mask = f"url(#{mask_id})"
+
+    return shape, mask
+
+
+def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9, size=200):        
     percentage = normalize_gradient(gradient)
     ring_width = size / 8
     outer_radius = size / 2 - 5
@@ -1462,60 +1557,113 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     knob_x, knob_y = angle_to_coords(knob_angle, outer_radius)
     knob_end_x, knob_end_y = angle_to_coords(knob_angle, outer_radius - knob_length)
      
-    radio_dial_arc = G(
-        Path(fill="none")
-            .M(center-inner_radius, center)
-            .A(inner_radius, inner_radius, 0, 1, 1, center+inner_radius, center),
-        Circle(r=inner_radius * 0.5, cx=center, cy=center, fill="white"),
-        id="radio-dial-arc"
+
+    sqrt_v = math.sqrt(v)
+    outer_m_radius = inner_radius * 0.65 
+    inner_v_radius = outer_m_radius * 0.6 
+    m_text_radius = (outer_m_radius + inner_v_radius) * .5
+        
+    m_circle = Circle(cx=center, cy=center, r=outer_m_radius, fill="none", stroke="#888", stroke_width=1)    
+    v_circle = Circle(cx=center, cy=center, r=inner_v_radius, fill="none", stroke="#888", stroke_width=1)
+    
+    m_ticks = []
+    m_labels = []
+    m_values = [-1.00, -0.20, -0.02, 0.00, 0.02, 0.20, 1.00]
+    label_distance = 1
+
+    for i, value in enumerate(m_values):
+        angle = math.pi + (i / (len(m_values) - 1)) * math.pi
+        tick_start = angle_to_coords(angle, outer_m_radius)
+        tick_end = angle_to_coords(angle, outer_m_radius + 5)
+        m_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], stroke="#888", stroke_width=1))                
+        text_width = len(f"{value:.2f}") * size / 35 
+                
+        if angle > math.pi:  # Left side
+            label_radius = outer_m_radius + label_distance + text_width / 2
+        else:  # Right side
+            label_radius = outer_m_radius + label_distance + text_width / 2
+        
+        label_pos = angle_to_coords(angle, label_radius)
+                
+        rotation = (angle - math.pi) * 180 / math.pi
+        if rotation > 90 or rotation < -90:
+            rotation += 180
+        
+        m_labels.append(
+            Text(
+                f"{value:.2f}",
+                x=label_pos[0], y=label_pos[1],
+                font_size=size/35,
+                fill="#888",
+                text_anchor="middle",
+                dominant_baseline="central",
+                transform=f"rotate({rotation} {label_pos[0]} {label_pos[1]})"
+            )
+        )
+    m_angle = pos_to_angle(m)    
+    v_ticks = []    
+    num_ticks = 20
+
+    for i in range(-num_ticks, num_ticks + 1):        
+        angle = m_angle + (i / num_ticks) * (math.pi / 2)    
+        angle = angle % (2 * math.pi)
+        if angle < math.pi:
+            angle += math.pi
+
+        tick_start = angle_to_coords(angle, inner_v_radius)
+        tick_end = angle_to_coords(angle, inner_v_radius - 5)
+               
+        v_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], 
+                            stroke="#888", stroke_width=1))
+
+
+    buffer_angle = math.radians(12)
+    text_arc_length = math.radians(40)
+
+    if m >= 0:
+        end_angle = m_angle - buffer_angle
+        start_angle = end_angle - text_arc_length
+    else:
+        start_angle = m_angle + buffer_angle
+        end_angle = start_angle + text_arc_length
+
+
+    outer_bean_radius = m_text_radius * 1.15
+    inner_bean_radius = m_text_radius * 0.85
+
+    m_path_text_radius = (outer_bean_radius + inner_bean_radius) / 2
+    
+    m_text_path = Path(id="m-text-path", fill="none")
+    m_text_path.M(size/2 + m_path_text_radius * math.cos(start_angle), 
+                size/2 + m_path_text_radius * math.sin(start_angle))
+    m_text_path.A(m_path_text_radius, m_path_text_radius, 0, 0, 1, 
+                size/2 + m_path_text_radius * math.cos(end_angle), 
+                size/2 + m_path_text_radius * math.sin(end_angle))
+
+    bean_shape = create_bean_shape(size/2, size/2, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
+
+    m_shape, m_mask = create_shape_with_cutout_text(
+        bean_shape,
+        f"{m:.4f}",
+        size/30,
+        text_path_id="m-text-path"
     )
     
-    std_start = max(scale_min, m - std_dev)
-    std_end = min(scale_max, m + std_dev)
-    std_area_start_angle = pos_to_angle(std_start)
-    std_area_end_angle = pos_to_angle(std_end)
 
-    std_area = Path(fill="rgba(255, 192, 203, 0.5)")
-    std_area.M(*angle_to_coords(std_area_start_angle, inner_radius * 0.5))
-    std_area.A(inner_radius * 0.5, inner_radius * 0.5, 0, 0, 1, 
-               *angle_to_coords(std_area_end_angle, inner_radius * 0.5))
-    std_area.L(*angle_to_coords(std_area_end_angle, inner_radius))
-    std_area.A(inner_radius, inner_radius, 0, 0, 0, 
-               *angle_to_coords(std_area_start_angle, inner_radius))
-    std_area.Z()
-    
-    label_radius = inner_radius * 0.65 
-    label_values = [scale_min, scale_min/5, scale_min/50, 0, scale_max/50, scale_max/5, scale_max]
-    
-    std_dev_labels = [
-        Text(
-            f"{value:.2f}",
-            x=center + label_radius * math.cos(math.pi + (i / (len(label_values) - 1)) * math.pi),
-            y=center + label_radius * math.sin(math.pi + (i / (len(label_values) - 1)) * math.pi),
-            font_size=size/24,
-            text_anchor="middle",
-            dominant_baseline="middle"
-        )
-        for i, value in enumerate(label_values)
-    ]
-
-    ticks = [
-        Line(
-            *angle_to_coords(math.pi + (i / (len(label_values) - 1)) * math.pi, inner_radius),
-            *angle_to_coords(math.pi + (i / (len(label_values) - 1)) * math.pi, inner_radius - ring_width/2),
-            stroke="black", stroke_width=1, stroke_opacity=0.2
-        )
-        for i in range(len(label_values))
-    ]
-    
-    m_angle = pos_to_angle(m)
-    arrow_start_x, arrow_start_y = angle_to_coords(m_angle, inner_radius)
     m_indicator = Line(
-        *angle_to_coords(m_angle, inner_radius * 0.5),
-        *angle_to_coords(m_angle, inner_radius),
-        stroke="red", stroke_width=2
+        x1=center,
+        y1=center,
+        x2=angle_to_coords(m_angle, outer_m_radius * 1.1)[0],
+        y2=angle_to_coords(m_angle, outer_m_radius * 1.1)[1],
+        stroke="#372572", stroke_width=2
     )
-
+    center_circle = Circle(
+    cx=size/2,
+    cy=size/2,
+    r=3,
+    fill="#372572"
+)
+    
     # Calculate arrow length based on the magnitude of the gradient
     arrow_length = abs(gradient) * (1 - beta1) * (outer_radius - inner_radius)        
     max_arrow_length = (outer_radius - inner_radius) * 0.5
@@ -1560,32 +1708,30 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
     
     max_gradient = 5.0
     blue_arrow = create_arrow_path(center, center, outer_radius, inner_radius, m, gradient, scale_min, scale_max, max_gradient)
-    
-    m_text_radius = inner_radius * 0.35
-    m_text_path = Path(id="m-value-path", fill="none")
-    m_text_path.M(center-m_text_radius, center).A(m_text_radius, m_text_radius, 0, 1, 1, center+m_text_radius, center)
-
-    m_normalized = (symlog_scale(m, linthresh) - log_scale_min) / (log_scale_max - log_scale_min)    
-    text_margin = 0.2 # Adjust the range to prevent cut-off
-    m_adjusted = text_margin + m_normalized * (1 - 2 * text_margin)
-    
-    m_value_text = Text(
-        TextPath(
-            Tspan(f"{m:.4f}"),
-            href="#m-value-path",
-            startOffset=f"{m_adjusted * 100}%"
-        ),
-        fill="red", font_size=size/24, font_weight="bold", text_anchor="middle"
+        
+    sqrt_v_shape = Rect(
+        x=size/2 - size*0.15/2,
+        y=size/2 + size/70,
+        width=size*0.15,
+        height=size*0.05,
+        rx=(size*0.05)/2,  # rounded corners
+        fill="#4a90e2",
+        opacity=0.8
     )
 
+    sqrt_v_shape, sqrt_v_mask = create_shape_with_cutout_text(
+        sqrt_v_shape,
+        f"{sqrt_v:.4f}",
+        size/26
+    )
+  
     gradient_defs = {
         'low': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
         'mid': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
         'high': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
     }
 
-    gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'
-    # emoji = {"low": "👇", "mid": "🙅‍♀️", "high": "👆"}[gradient_key]
+    gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'    
 
     gradient_def = LinearGradient(
         *[Stop(offset=f"{i/(len(gradient_defs[gradient_key])-1)*100}%", 
@@ -1656,20 +1802,23 @@ def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9
                     text_anchor="middle", dominant_baseline="central", fill="white"
                 ),
                 id="z-text-mask",
-            )            
+            ),
+            sqrt_v_mask,
+            m_mask,          
         ),
         circle(r=outer_radius, fill="url(#dialGradient)", mask="url(#dialMask)"),
         G(
             circle(r=inner_radius, fill="white", stroke="none"),
-            radio_dial_arc, knob_path, *ticks, std_area, *std_dev_labels,                        
-            m_value_text, m_indicator, data_text, z_background, z_cutout, blue_arrow,
+            m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,
+            m_shape, m_indicator, center_circle, blue_arrow,
+            sqrt_v_shape, data_text, z_background, z_cutout,                                                      
+            
             filter="url(#dropShadow)"
         ),        
        
         Text(
             TextPath(
-                Tspan(f"{gradient:.4f}", dy="0.4em"),
-                # Tspan(emoji, font_size=size/10, dy="0em"),
+                Tspan(f"{gradient:.4f}", dy="0.4em"),                
                 href="#textPath", startOffset="50%",
             ),
             font_family="Arial, sans-serif", font_size=size/10, text_anchor="middle", fill="black"
