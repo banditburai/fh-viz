@@ -1,5 +1,3 @@
-import base64
-import httpx
 import math
 from fasthtml.common import *
 from fasthtml.svg import *
@@ -13,9 +11,10 @@ import time
 tailwindLink = Link(rel="stylesheet", href="assets/output.css", type="text/css")
 sselink = Script(src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js")
 chartlink = Script(src="https://cdn.jsdelivr.net/npm/chart.js")
+svgpanzoomlink = Script(src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js")
 app, rt = fast_app(
     pico=False,    
-    hdrs=(tailwindLink, sselink, chartlink)
+    hdrs=(tailwindLink, sselink, chartlink, svgpanzoomlink)
 )
 
 setup_toasts(app)
@@ -454,6 +453,7 @@ class Visualizer:
                 self.val_losses.append(val_loss.data)
                     
         current_step = self.get_current_step()
+        print("current_step: ", current_step, "param_state: ", current_step['param_state'])
         self.history.append(current_step)
         return current_step
 
@@ -483,6 +483,16 @@ class Visualizer:
             total_loss = total_loss + loss
         mean_loss = total_loss * (1.0 / len(X))
         return mean_loss
+    
+    def update_param_state(self, param_state):
+        if self.model:
+            for i, p in enumerate(self.model.parameters()):
+                param_name = f'param_{i}'
+                if param_name in param_state:
+                    p.data = param_state[param_name]['value']
+                    p.grad = param_state[param_name]['grad']
+                    setattr(p, 'm', param_state[param_name]['m'])
+                    setattr(p, 'v', param_state[param_name]['v'])
 
     def get_graph_data(self):
         nodes = []
@@ -579,266 +589,337 @@ def progress_tracker(step_count, train_loss, val_loss):
         hx_trigger="progressUpdate"
     )
 
+@rt("/update-optimizer-state")
+async def update_optimizer_state(request: Request):
+    data = await request.json()
+    # Assuming you have a global or accessible visualizer object
+    visualizer.update_param_state(data)
+    return create_main_parameter_dials(visualizer)
+
 animation_script = """
-let isTraining = false;
-let eventSource;
-let reconnectAttempts = 0;
-const maxReconnectAttempts = 5;
-const reconnectDelay = 5000; // 5 seconds
+const config = {
+    maxReconnectAttempts: 5,
+    reconnectDelay: 5000,
+    maxVisibleSteps: 25
+};
 
-function updatePlayPauseButton() {
-    const playPauseBtn = document.getElementById('play-pause-btn');
-    if (isTraining) {
-        playPauseBtn.textContent = 'Pause';
-        playPauseBtn.classList.remove('bg-green-500');
-        playPauseBtn.classList.add('bg-red-500');
-    } else {
-        playPauseBtn.textContent = 'Play';
-        playPauseBtn.classList.remove('bg-red-500');
-        playPauseBtn.classList.add('bg-green-500');
-    }
-}
+let state = {
+    isTraining: false,
+    eventSource: null,
+    reconnectAttempts: 0,    
+};
 
-function updateSSEConnection() {
-    if (eventSource) {
-        eventSource.close();
+const elements = {
+    playPauseBtn: () => document.getElementById('play-pause-btn'),
+    stepText: () => document.getElementById('step-text'),
+    trainLossText: () => document.getElementById('train-loss-text'),
+    valLossText: () => document.getElementById('val-loss-text'),
+    chartContainer: () => document.getElementById('loss-chart-container'),
+    parameterDials: () => document.getElementById('parameter-dials')
+};
+
+const updateUI = {
+    playPauseButton: () => {
+        const btn = elements.playPauseBtn();
+        btn.textContent = state.isTraining ? 'Pause' : 'Play';
+        btn.classList.toggle('bg-red-500', state.isTraining);
+        btn.classList.toggle('bg-green-500', !state.isTraining);
+    },
+    progressTracker: (data) => {
+        if (data.step_count !== undefined) {
+            elements.stepText().textContent = `Step ${data.step_count}/100`;
+        }
+        if (data.train_loss !== undefined) {
+            elements.trainLossText().textContent = `Train loss: ${data.train_loss}`;
+            elements.trainLossText().dataset.value = data.train_loss;
+        }
+        if (data.val_loss !== undefined) {
+            elements.valLossText().textContent = `Validation loss: ${data.val_loss}`;
+            elements.valLossText().dataset.value = data.val_loss;
+        }
+        elements.chartContainer().classList.toggle('hidden', data.step_count === 0);
+        if (data.step_count > 0) {
+            updateLossChart(data.step_count, parseFloat(data.train_loss), parseFloat(data.val_loss));
+        }
+        if (data.param_state !== undefined) {
+            updateOptimizerState(data.param_state);
+        }
+        document.dispatchEvent(new CustomEvent('progressUpdated', { detail: data }));
     }
+};
+
+const updateSSEConnection = () => {
+    if (state.eventSource) state.eventSource.close();
     
-    if (reconnectAttempts >= maxReconnectAttempts) {
+    if (state.reconnectAttempts >= config.maxReconnectAttempts) {
         console.error('Max reconnection attempts reached. Please refresh the page.');
         return;
     }
 
-    const url = `/train_stream?train=${isTraining}`;
-    eventSource = new EventSource(url);
+    state.eventSource = new EventSource(`/train_stream?train=${state.isTraining}`);
     
-    eventSource.addEventListener('open', function(e) {
+    state.eventSource.addEventListener('open', () => {
         console.log('SSE connection opened');
-        reconnectAttempts = 0; // Reset attempts on successful connection
+        state.reconnectAttempts = 0;
     });
 
-    eventSource.addEventListener('step', function(e) {
-        const data = JSON.parse(e.data);
-        updateProgressTracker(data);
+    state.eventSource.addEventListener('step', (e) => {
+        updateUI.progressTracker(JSON.parse(e.data));
     });
 
-    eventSource.addEventListener('heartbeat', function(e) {
-        console.log('Heartbeat received');
-    });
+    state.eventSource.addEventListener('heartbeat', () => console.log('Heartbeat received'));
 
-    eventSource.addEventListener('error', function(e) {
+    state.eventSource.addEventListener('error', (e) => {
         console.error('SSE connection error:', e);
-        eventSource.close();
-        reconnectAttempts++;
-        setTimeout(updateSSEConnection, reconnectDelay);
+        state.eventSource.close();
+        state.reconnectAttempts++;
+        setTimeout(updateSSEConnection, config.reconnectDelay);
     });
-}
+};
 
-function handlePlayPause() {
-    isTraining = !isTraining;
-    updatePlayPauseButton();
+const handlePlayPause = () => {
+    state.isTraining = !state.isTraining;
+    updateUI.playPauseButton();
     updateSSEConnection();
-}
+};
 
-function handleTrainStep() {
-    if (!isTraining) {
+const handleTrainStep = () => {
+    if (!state.isTraining) {
         fetch('/train_stream?step=true')
             .then(response => response.text())
             .then(text => {
-                const lines = text.split('\\n');
-                const eventData = lines.find(line => line.startsWith('data:'));
+                const eventData = text.split('\\n').find(line => line.startsWith('data:'));
                 if (eventData) {
-                    const data = JSON.parse(eventData.slice(5));
-                    updateProgressTracker(data);
+                    updateUI.progressTracker(JSON.parse(eventData.slice(5)));
                 }
             })
             .catch(error => console.error('Error during single step:', error));
     }
-}
+};
 
-function handleReset() {
+const handleReset = () => {
     fetch('/reset', { method: 'POST' })
         .then(response => response.json())
         .then(data => {
-            updateProgressTracker(data);
-            isTraining = false;
-            updatePlayPauseButton();
+            updateUI.progressTracker(data);
+            state.isTraining = false;
+            updateUI.playPauseButton();
             updateSSEConnection();
-            console.log(`Reset to step 0`);
+            console.log('Reset to step 0');
             resetChart();
         });
-            
-}
+};
 
-function updateProgressTracker(data) {
-    const stepText = document.getElementById('step-text');
-    const trainLossText = document.getElementById('train-loss-text');
-    const valLossText = document.getElementById('val-loss-text');
-    const chartContainer = document.getElementById('loss-chart-container');
+const updateOptimizerState = (paramState) => {
+    fetch('/update-optimizer-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(paramState)
+    })
+    .then(response => response.text())
+    .then(svg => {
+        const parameterDials = elements.parameterDials();
+        if (parameterDials) {
+            parameterDials.innerHTML = svg;
+            // Dispatch custom event after updating SVG
+            document.body.dispatchEvent(new CustomEvent('svgUpdated'));
+        } else {
+            console.error("Element with id 'parameter-dials' not found");
+        }
+    })
+    .catch(error => console.error('Error updating optimizer state:', error));
+};
 
-    if (stepText) stepText.textContent = `Step ${data.step_count}/100`;
-    if (trainLossText) {
-        trainLossText.textContent = `Train loss: ${data.train_loss}`;
-        trainLossText.dataset.value = data.train_loss;
-    }
-    if (valLossText) {
-        valLossText.textContent = `Validation loss: ${data.val_loss}`;
-        valLossText.dataset.value = data.val_loss;
-    }
+let lossChart;
 
-    // Show/hide chart based on step count
-    if (data.step_count > 0) {
-        chartContainer.classList.remove('hidden');
-        updateLossChart(data.step_count, parseFloat(data.train_loss), parseFloat(data.val_loss));
-    } else {
-        chartContainer.classList.add('hidden');
-    }
-
-    // Trigger a custom event
-    const event = new CustomEvent('progressUpdated', { detail: data });
-    document.dispatchEvent(event);
-}
-
-// Initialize loss chart
- let lossChart;
-
-        function initChart() {
-            const ctx = document.getElementById('loss-chart');
-            if (ctx && !lossChart) {
-                lossChart = new Chart(ctx, {
-                    type: 'bar',
-                    data: {
-                        labels: [],
-                        datasets: [{
-                            label: 'Training Loss',
-                            data: [],
-                            backgroundColor: 'rgba(75, 192, 192, 0.6)',
-                            borderColor: 'rgb(75, 192, 192)',
-                            borderWidth: 1
-                        },
-                        {
-                            label: 'Validation Loss',
-                            data: [],
-                            backgroundColor: 'rgba(255, 99, 132, 0.6)',
-                            borderColor: 'rgb(255, 99, 132)',
-                            borderWidth: 1
-                        }]
+function initChart() {
+    const ctx = document.getElementById('loss-chart');
+    if (ctx && !lossChart) {
+        lossChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Training Loss',
+                    data: [],
+                    backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                    borderColor: 'rgb(75, 192, 192)',
+                    borderWidth: 1
+                },
+                {
+                    label: 'Validation Loss',
+                    data: [],
+                    backgroundColor: 'rgba(255, 99, 132, 0.6)',
+                    borderColor: 'rgb(255, 99, 132)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        stacked: true,
+                        beginAtZero: true,
+                        position: 'top',
+                        title: {
+                            display: true,
+                            text: 'Loss',
+                            padding: {top: 10, bottom: 0}
+                        }
                     },
-                    options: {
-                        indexAxis: 'y',
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            x: {
-                                stacked: true,
-                                beginAtZero: true,
-                                position: 'top',
-                                title: {
-                                    display: true,
-                                    text: 'Loss',
-                                    padding: {top: 10, bottom: 0}
-                                }
-                            },
-                            y: {
-                                stacked: true,
-                                reverse: true,
-                                title: {
-                                    display: true,
-                                    text: 'Steps',
-                                    padding: {top: 0, left: 10, right: 10, bottom: 0}
-                                }
-                            }
-                        },
-                        plugins: {
-                            legend: {
-                                display: false
-                            },
-                            annotation: {
-                                annotations: {
-                                    currentStep: {
-                                        type: 'line',
-                                        yMin: 0,
-                                        yMax: 0,
-                                        borderColor: 'rgb(255, 255, 0)',
-                                        borderWidth: 2
-                                    }
-                                }
+                    y: {
+                        stacked: true,
+                        reverse: true,
+                        title: {
+                            display: true,
+                            text: 'Steps',
+                            padding: {top: 0, left: 10, right: 10, bottom: 0}
+                        }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    annotation: {
+                        annotations: {
+                            currentStep: {
+                                type: 'line',
+                                yMin: 0,
+                                yMax: 0,
+                                borderColor: 'rgb(255, 255, 0)',
+                                borderWidth: 2
                             }
                         }
                     }
-                });
+                }
             }
-        }
-
-        function resetChart() {
-    if (lossChart) {
-        lossChart.data.labels = [];
-        lossChart.data.datasets[0].data = [];
-        lossChart.data.datasets[1].data = [];
-        lossChart.update();
+        });
     }
-    
-    const chartContainer = document.getElementById('loss-chart-container');
-    if (chartContainer) {
-        chartContainer.classList.add('hidden');
-    }    
 }
 
-        function updateLossChart(stepCount, trainLoss, valLoss) {
-            const chartContainer = document.getElementById('loss-chart-container');
-            if (stepCount > 0) {
-                chartContainer.classList.remove('hidden');
-                if (lossChart) {
-                    const maxVisibleSteps = 25;
-                    
-                    lossChart.data.labels.push(stepCount);
-                    lossChart.data.datasets[0].data.push(trainLoss);
-                    lossChart.data.datasets[1].data.push(valLoss);
-                    
-                    if (lossChart.data.labels.length > maxVisibleSteps) {
-                        lossChart.data.labels = lossChart.data.labels.slice(-maxVisibleSteps);
-                        lossChart.data.datasets[0].data = lossChart.data.datasets[0].data.slice(-maxVisibleSteps);
-                        lossChart.data.datasets[1].data = lossChart.data.datasets[1].data.slice(-maxVisibleSteps);
-                    }
-                    
-                    lossChart.options.plugins.annotation.annotations.currentStep.yMin = lossChart.data.labels.length - 1;
-                    lossChart.options.plugins.annotation.annotations.currentStep.yMax = lossChart.data.labels.length - 1;
-                    
-                    lossChart.update();
-                }                                
-            } else {
-                chartContainer.classList.add('hidden');
+function resetChart() {
+if (lossChart) {
+lossChart.data.labels = [];
+lossChart.data.datasets[0].data = [];
+lossChart.data.datasets[1].data = [];
+lossChart.update();
+}
+
+const chartContainer = document.getElementById('loss-chart-container');
+if (chartContainer) {
+chartContainer.classList.add('hidden');
+}    
+}
+
+function updateLossChart(stepCount, trainLoss, valLoss) {
+    const chartContainer = document.getElementById('loss-chart-container');
+    if (stepCount > 0) {
+        chartContainer.classList.remove('hidden');
+        if (lossChart) {
+            const maxVisibleSteps = 25;
+            
+            lossChart.data.labels.push(stepCount);
+            lossChart.data.datasets[0].data.push(trainLoss);
+            lossChart.data.datasets[1].data.push(valLoss);
+            
+            if (lossChart.data.labels.length > maxVisibleSteps) {
+                lossChart.data.labels = lossChart.data.labels.slice(-maxVisibleSteps);
+                lossChart.data.datasets[0].data = lossChart.data.datasets[0].data.slice(-maxVisibleSteps);
+                lossChart.data.datasets[1].data = lossChart.data.datasets[1].data.slice(-maxVisibleSteps);
             }
-        }
+            
+            lossChart.options.plugins.annotation.annotations.currentStep.yMin = lossChart.data.labels.length - 1;
+            lossChart.options.plugins.annotation.annotations.currentStep.yMax = lossChart.data.labels.length - 1;
+            
+            lossChart.update();
+        }                                
+    } else {
+        chartContainer.classList.add('hidden');
+    }
+}
 
-// Listen for SSE events
-document.body.addEventListener('htmx:sseMessage', function(evt) {
+document.body.addEventListener('htmx:sseMessage', (evt) => {
     if (evt.detail.type === 'step') {
-        const data = JSON.parse(evt.detail.data);                
-        updateProgressTracker(data);
-    }
-});
-        
-       
-
-// Add event listeners
-document.getElementById('play-pause-btn').addEventListener('click', handlePlayPause);
-document.getElementById('step-btn').addEventListener('click', handleTrainStep);
-document.getElementById('reset-btn').addEventListener('click', handleReset);
-
-
-window.addEventListener('beforeunload', function() {
-    if (eventSource) {
-        eventSource.close();
+        updateUI.progressTracker(JSON.parse(evt.detail.data));
     }
 });
 
-// Initialize SSE connection when the page loads
-document.addEventListener('DOMContentLoaded', function() {
+['play-pause-btn', 'step-btn', 'reset-btn'].forEach(id => {
+    document.getElementById(id).addEventListener('click', {
+        'play-pause-btn': handlePlayPause,
+        'step-btn': handleTrainStep,
+        'reset-btn': handleReset
+    }[id]);
+});
+
+window.addEventListener('beforeunload', () => {
+    if (state.eventSource) state.eventSource.close();
+});
+
+document.addEventListener('DOMContentLoaded', () => {
     updateSSEConnection();
     initChart();
+    initializeSvgPanZoom();
 });
 """
+
+# -----------------------------------------------------------------------------
+# svg-pan-zoom related
+panzoomscript = """
+let panZoomInstance = null;
+
+function initializeSvgPanZoom() {
+    const svgPanZoomState = JSON.parse(document.getElementById('panZoomState').value);
+    const container = document.getElementById('parameter-dials');
+    const svgElement = container.querySelector('svg');
+    if (svgElement) {
+        // Set the SVG background to transparent
+        svgElement.style.backgroundColor = 'transparent';
+        
+        if (panZoomInstance) {
+            panZoomInstance.destroy();
+        }
+        
+        panZoomInstance = svgPanZoom(svgElement, {
+            zoomEnabled: true,
+            controlIconsEnabled: true,
+            fit: true,            
+            center: true,
+            minZoom: 0.1,
+            maxZoom: 10
+        });
+        panZoomInstance.setOnPan(function(point) {        
+        document.getElementById('panZoomState').value = JSON.stringify({ zoom: panZoomInstance.getZoom(), pan: point });
+        });
+        panZoomInstance.setOnZoom(function(zoom) {
+            document.getElementById('panZoomState').value = JSON.stringify({ zoom: zoom, pan: panZoomInstance.getPan() });
+        });
+
+        
+        panZoomInstance.zoom(svgPanZoomState.zoom);
+        panZoomInstance.pan(svgPanZoomState.pan);
+    
+
+        // Resize and fit on window resize
+        window.addEventListener('resize', function() {
+            panZoomInstance.resize();
+            panZoomInstance.fit();
+            panZoomInstance.center();
+        });
+    }
+}
+
+// Listen for the custom event that will be triggered after the SVG is updated
+document.body.addEventListener('svgUpdated', function() {
+    initializeSvgPanZoom();
+});
+"""
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 def create_main_parameter_dials(visualizer, container_width=800, container_height=400):
     if not visualizer.model:
@@ -878,7 +959,8 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
         width="100%", height="100%", 
         viewBox=f"0 0 {svg_width} {svg_height}",
         preserveAspectRatio="xMidYMid meet",
-        id="parameter-dials"
+        id="parameter-dials-svg",
+        style="min-height: 400px;"
     )
 
 def resize_dial(param_name, param, size):
@@ -947,7 +1029,12 @@ def get():
                 # Graph Visualization Section
                 Div(
                     H3("Optimizer State", cls="text-xl font-semibold mb-2"),
-                    create_main_parameter_dials(visualizer, container_width=800, container_height=600),
+                     Div(
+                        create_main_parameter_dials(visualizer),
+                        id="parameter-dials",
+                        cls="w-full h-[400px] overflow-hidden"
+                    ),
+                    Input(type="hidden", id="panZoomState", value='{"zoom": 1, "pan": {"x": 0, "y": 0}}'),
                     id="optimizer-state-container",
                     cls="bg-white p-4 rounded-lg shadow-md"
                 ),
@@ -957,6 +1044,7 @@ def get():
             cls="flex flex-col md:flex-row gap-4 md:space-x-4 w-full max-w-6xl mx-auto"
         ),         
         Script(animation_script),
+        Script(panzoomscript),
         cls="flex flex-col items-center p-4 min-h-screen bg-[#e0e8d8] text-black"
     )
 
@@ -1137,180 +1225,6 @@ async def post():
 # -------------------------AdamW Optimizer----------------------------------------------
 # ------------------------------------------------------------------------------------------
 
-@rt('/update_step')
-async def post(request: Request):
-    step = int((await request.form())['step'])
-    return create_visualization_for_step(step)
-
-@rt('/prev_step')
-async def post(request: Request):
-    current_step = int((await request.form())['current_step'])
-    new_step = max(0, current_step - 1)
-    return create_visualization_for_step(new_step)
-
-@rt('/next_step')
-async def post(request: Request):
-    current_step = int((await request.form())['current_step'])
-    new_step = min(99, current_step + 1)  # Assuming 100 steps total
-    return create_visualization_for_step(new_step)
-
-def create_visualization_for_step(step):
-    step_data, param_state = visualizer.history[step]
-    dials = create_mocked_param_dials(param_state)
-    progress = progress_tracker(step_data['step_count'], step_data['train_loss'], step_data['val_loss'])
-    return Div(
-        progress,
-        dials,
-        id="visualization"
-    )
-
-param_dial_script = """
-document.body.addEventListener('htmx:sseMessage', function(evt) {
-    if (evt.detail.data === "optimization_complete") {
-        document.getElementById("run-optimization-btn").innerHTML = "Run Optimization";
-        document.getElementById("run-optimization-btn").disabled = false;
-    } else {
-        try {
-            const updateData = JSON.parse(evt.detail.data);
-            updateProgressTracker(updateData);
-            // We'll handle dial updates later
-            // updateParameterDials(updateData.params);
-        } catch (error) {
-            console.error("Error parsing SSE data:", error);
-        }
-    }
-});
-
-function updateProgressTracker(data) {
-    const progressTracker = document.getElementById("progress-tracker");
-    const trainLoss = isNaN(data.train_loss) ? data.train_loss : parseFloat(data.train_loss).toFixed(6);
-    const valLoss = data.val_loss === "---" ? "---" : parseFloat(data.val_loss).toFixed(6);
-    progressTracker.innerHTML = `Step ${data.step}: Train Loss: ${trainLoss}, Val Loss: ${valLoss}`;
-}
-
-htmx.on("htmx:afterRequest", function(event) {
-    if (event.detail.elt.id === "run-optimization-btn") {
-        event.detail.elt.innerHTML = "Optimizing...";
-        event.detail.elt.disabled = true;
-    }
-});
-"""
-
-def create_mocked_param_dials(num_dials=51, dial_size=60, container_width=800, container_height=400):
-    dial_gap = 10
-    
-    # Calculate the number of columns and rows that can fit in the container
-    columns = max(1, (container_width + dial_gap) // (dial_size + dial_gap))
-    rows = max(1, (container_height + dial_gap) // (dial_size + dial_gap))
-    
-    # Adjust the number of dials if there's not enough space
-    num_dials = min(num_dials, columns * rows)
-    
-    # Recalculate rows based on the actual number of dials
-    rows = math.ceil(num_dials / columns)
-    
-    # Calculate the actual grid dimensions
-    grid_width = columns * (dial_size + dial_gap) - dial_gap
-    grid_height = rows * (dial_size + dial_gap) - dial_gap
-    
-    # Center the grid within the container
-    start_x = (container_width - grid_width) / 2
-    start_y = (container_height - grid_height) / 2    
-    
-    dials = []
-    for i in range(num_dials):
-        col = i % columns
-        row = i // columns
-        x = start_x + col * (dial_size + dial_gap)
-        y = start_y + row * (dial_size + dial_gap)
-        param_name = f"param_{i}"        
-        dial = create_parameter_dial(param_name, data=0, gradient=0, m=0, v=0, beta1=0.9)
-        if dial is not None:
-            dial.attrs['width'] = dial_size
-            dial.attrs['height'] = dial_size
-            dials.append(G(dial, transform=f"translate({x}, {y})"))
-        else:
-            print(f"Warning: Dial {i} is None")
-    
-    svg_width = max(container_width, grid_width + 2 * start_x)
-    svg_height = max(container_height, grid_height + 2 * start_y)
-    
-    return Svg(
-        Rect(x=0, y=0, width=svg_width, height=svg_height, fill="#f0f0f0"),
-        *dials,
-        width="100%", height="100%", 
-        viewBox=f"0 0 {svg_width} {svg_height}",
-        preserveAspectRatio="xMidYMid meet"
-    )
-
-def create_visualization(history):
-    try:
-        svg_content = []
-        for i, (step_data, param_state) in enumerate(history):
-            dials = create_mocked_param_dials(param_state)
-            progress = progress_tracker(step_data['step_count'], step_data['train_loss'], step_data['val_loss'])
-            svg_content.append(Div(progress, dials, id=f"step-{i}", cls="hidden" if i > 0 else ""))
-        
-        return Div(
-            *svg_content,
-            Div(
-                Input(type="range", min="0", max=f"{len(history)-1}", value="0", cls="w-full", 
-                      hx_trigger="input", hx_post="/update_step", hx_target="#visualization"),
-                cls="mt-4"
-            ),
-            Button("Previous", hx_post="/prev_step", hx_target="#visualization"),
-            Button("Next", hx_post="/next_step", hx_target="#visualization"),
-            id="visualization"
-        )
-    except Exception as e:
-        print(f"Error in create_visualization: {str(e)}")
-        return Div(f"Error: {str(e)}", id="visualization")
-
-@rt('/run_adamw')
-async def post():
-    async def event_stream():
-        visualizer.reset()
-        visualizer.generate_dataset()    
-
-        for step in range(100):  # Run for 100 steps
-            visualizer.is_training = True
-            visualizer.train_step()
-            visualizer.is_training = False
-            
-            step_data, param_state = visualizer.history[-1]
-            
-            update_data = {
-                'step': step_data['step_count'],
-                'train_loss': step_data['train_loss'],
-                'val_loss': step_data['val_loss'],
-                'params': param_state
-            }
-            
-            yield f"data: {json.dumps(update_data)}\n\n"
-
-            if step % 5 == 0 or step == 99:  # Update every 5 steps and on the last step
-                await asyncio.sleep(0.1)  # Small delay to control update rate
-
-        yield "event: complete\ndata: optimization_complete\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-def update_dials(param_state):
-    dials = []
-    for param_name, param_data in param_state.items():
-        dial = create_parameter_dial(
-            data=param_data['value'],
-            gradient=param_data['grad'],
-            m=param_data['m'],
-            v=param_data['v'],
-            beta1=0.9  # Assuming beta1 is constant
-        )
-        dial.attrs['width'] = 60
-        dial.attrs['height'] = 60
-        dials.append(dial)
-    
-    return create_mocked_param_dials(num_dials=len(dials), dial_size=60, container_width=800, container_height=400, custom_dials=dials)
-
 @rt('/adamw')
 async def get():    
     return Div(
@@ -1324,8 +1238,7 @@ async def get():
                     });
                 });
             });
-        """),
-        Script(param_dial_script),       
+        """),              
         Div(
             H1("AdamW Optimizer", cls="text-3xl font-bold mb-6 text-center text-blue-600"),
             
@@ -1333,10 +1246,8 @@ async def get():
             Div(
            H2("AdamW in Action", cls="text-2xl font-semibold mb-4"),
             P("Watch how AdamW optimizes parameters over multiple steps:", cls="mb-4"),
-            Div(
-                progress_tracker(0, "---", "---"),
-                create_mocked_param_dials(),
-                id="visualization-container", 
+            Div(                                
+                id="adamw-visualization-container", 
                 cls="mb-4"
             ),
             Button("Run Optimization", 
@@ -1442,245 +1353,6 @@ async def get():
 
 
 # ------------------------------------------------------------------------------------------
-# -------------------------Network Explainer Template--------------------------------------
-# ------------------------------------------------------------------------------------------
-@rt('/model_info')
-def get(request: Request):
-    page = int(request.query_params.get('page', '1'))
-    model = visualizer.model
-    
-    # Calculate total number of parameters
-    total_params = sum(len(n.w) + 1 for layer in model.layers for n in layer.neurons)
-    
-    # Define page titles
-    page_titles = {
-        1: "Neural Network Structure",
-        2: "Parameter Dials"
-    }
-    
-    descriptions = {
-        1: {
-            "above": "This diagram shows the structure of our neural network. Each circle represents a neuron, and the lines represent connections between neurons.",
-            "below": "The network consists of an input layer, hidden layers, and an output layer. The number of neurons in each layer determines the network's capacity to learn complex patterns."
-        },
-        2: {
-            "above": f"This diagram shows the structure of the neural network. Total learnable parameters: {total_params}",
-            "below": "The position of each dial indicates the current value of the parameter. As training progresses, these dials will rotate to optimize the network's predictions."
-        },
-        3: {
-            "above": "This visualization shows the activation levels of neurons in our network. The brightness of each neuron indicates its level of activation.",
-            "below": "Observing these activations can help us understand which parts of the network are most responsive to different inputs, providing insights into the network's decision-making process."
-        }
-    }
-    # Get the appropriate SVG content based on the page
-    if page == 1:
-        svg_content = create_network_structure(model)
-        svg_element = Svg(*svg_content, 
-            width="100%", height="100%", 
-            viewBox="0 0 800 400",
-            preserveAspectRatio="xMidYMid meet",
-            cls="w-full aspect-[2/1] max-w-[800px] mx-auto sample-transition"),
-        svg_container = Div(svg_element, cls="w-full aspect-[2/1]") 
-    elif page == 2:
-        svg_content = create_parameter_dials(model)
-        svg_element = NotStr(svg_content) 
-        svg_container = Div(svg_element, cls="w-full aspect-[2/1]") 
-    else:
-        svg_container = Div() 
-
-    return Div(
-        H2(page_titles.get(page, "Unknown Page"), cls="text-2xl font-bold mb-4"),
-        P(descriptions[page]["above"], cls="text-lg mb-4"),
-        svg_container,
-        P(descriptions[page]["below"], cls="text-lg mt-4"),        
-        Div(
-            Button("Prev", 
-                   hx_get=f"/model_info?page={page-1}",
-                   hx_target="#model-info-container",
-                   hx_swap="innerHTML transition:true",
-                   cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded",
-                   disabled=page == 1),
-            Button("Next", 
-                   hx_get=f"/model_info?page={page+1}",
-                   hx_target="#model-info-container",
-                   hx_swap="innerHTML transition:true",
-                   cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded",
-                   disabled=page == 2),
-            cls="flex justify-between mt-4"
-        ),        
-        id="model-info-container",
-        cls="flex flex-col w-full max-w-4xl mx-auto p-4"
-    )
-
-def create_network_structure(model):
-    width = 800
-    height = 400
-    input_x = 50
-    output_x = width - 50
-    
-    svg_content = []
-    
-    input_size = len(model.layers[0].neurons[0].w)
-    hidden_layers = model.layers[:-1]
-    output_size = len(model.layers[-1].neurons)
-    layer_width = (output_x - input_x) / (len(hidden_layers) + 1)
-    
-    # Create edges first
-    for i in range(len(model.layers)):
-        start_x = input_x + i * layer_width
-        end_x = input_x + (i + 1) * layer_width
-        start_neurons = len(model.layers[i-1].neurons) if i > 0 else input_size
-        end_neurons = len(model.layers[i].neurons)
-        
-        for j in range(start_neurons):
-            for k in range(end_neurons):
-                y1 = (j + 1) * (height / (start_neurons + 1))
-                y2 = (k + 1) * (height / (end_neurons + 1))
-                svg_content.append(Line(x1=start_x, y1=y1, x2=end_x, y2=y2, stroke='#ccc'))
-    
-    # Create input layer shapes
-    for i in range(input_size):
-        y = (i + 1) * (height / (input_size + 1))
-        rect = Rect(width=40, height=40, x=-20, y=-20, fill='#6ab7ff')
-        g = G(rect, transform=f'translate({input_x}, {y})')
-        svg_content.append(g)
-    
-    # Create hidden layer shapes
-    for i, layer in enumerate(hidden_layers):
-        x = input_x + (i + 1) * layer_width
-        for j, neuron in enumerate(layer.neurons):
-            y = (j + 1) * (height / (len(layer.neurons) + 1))
-            circle = Circle(r=20, fill='#6aff9e')
-            g = G(circle, transform=f'translate({x}, {y})')
-            svg_content.append(g)
-    
-    # Create output layer shapes
-    for i in range(output_size):
-        y = (i + 1) * (height / (output_size + 1))
-        circle = Circle(r=20, fill='#ff9e6a')
-        g = G(circle, transform=f'translate({output_x}, {y})')
-        svg_content.append(g)
-    
-    # Create input layer text
-    for i in range(input_size):
-        y = (i + 1) * (height / (input_size + 1))
-        label = f'INPUT{i+1}'
-        text_bg = Rect(width=len(label)*7.5, height=18, x=input_x-len(label)*3.75, y=y-9, 
-                       fill='white', opacity=0.7, rx=3, ry=3)
-        text = Text(label, x=input_x, y=y+5, text_anchor='middle', font_size=12)
-        svg_content.append(G(text_bg, text))
-    
-    # Create hidden layer text
-    for i, layer in enumerate(hidden_layers):
-        x = input_x + (i + 1) * layer_width
-        for j, neuron in enumerate(layer.neurons):
-            y = (j + 1) * (height / (len(layer.neurons) + 1))
-            label = f'HIDDEN{j+1}'
-            text_bg = Rect(width=len(label)*7.5, height=18, x=x-len(label)*3.75, y=y-9, 
-                           fill='white', opacity=0.7, rx=3, ry=3)
-            text = Text(label, x=x, y=y+5, text_anchor='middle', font_size=12)
-            svg_content.append(G(text_bg, text))
-    
-    # Create output layer text
-    for i in range(output_size):
-        y = (i + 1) * (height / (output_size + 1))
-        label = f'OUTPUT{i+1}'
-        text_bg = Rect(width=len(label)*7.5, height=18, x=output_x-len(label)*3.75, y=y-9, 
-                       fill='white', opacity=0.7, rx=3, ry=3)
-        text = Text(label, x=output_x, y=y+5, text_anchor='middle', font_size=12)
-        svg_content.append(G(text_bg, text))
-    
-    return svg_content
-
-def create_parameter_dials(model):
-    svg_content = '<svg width="100%" height="100%" viewBox="0 0 800 400" preserveAspectRatio="xMidYMid meet">'
-    dial_size = 40
-    dial_gap = 20  # Increased gap between dials
-    
-    total_dials = sum(len(neuron.w) + 1 for layer in model.layers for neuron in layer.neurons)
-    
-    # Calculate the number of columns and rows that fit within the SVG
-    max_columns = (800 - dial_gap) // (dial_size + dial_gap)
-    max_rows = (400 - dial_gap) // (dial_size + dial_gap)
-    
-    columns = min(max_columns, total_dials)
-    rows = min(max_rows, math.ceil(total_dials / columns))
-    
-    # Recalculate columns if we exceed max_rows
-    if rows == max_rows:
-        columns = min(max_columns, math.ceil(total_dials / max_rows))
-    
-    grid_width = columns * (dial_size + dial_gap) - dial_gap
-    grid_height = rows * (dial_size + dial_gap) - dial_gap
-    
-    start_x = (800 - grid_width) / 2
-    start_y = (400 - grid_height) / 2
-    
-    # Add a background rectangle
-    svg_content += f'<rect x="0" y="0" width="800" height="400" fill="#f0f0f0"/>'
-    
-    # Group all dials
-    svg_content += f'<g transform="translate({start_x}, {start_y})">'
-    
-    param_index = 0
-    for layer in model.layers:
-        for neuron in layer.neurons:
-            for w in neuron.w:
-                if param_index >= columns * rows:
-                    break  # Stop if we've filled all available slots
-                
-                x = (param_index % columns) * (dial_size + dial_gap)
-                y = (param_index // columns) * (dial_size + dial_gap)
-                
-                normalized_data = max(min(w.data, 1), -1)
-                normalized_grad = max(min(w.grad, 1), -1)
-                
-                svg_content += create_dial(x, y, dial_size, normalized_data, normalized_grad, w.data)
-                
-                param_index += 1
-            
-            # Add bias dial
-            if param_index < columns * rows:
-                x = (param_index % columns) * (dial_size + dial_gap)
-                y = (param_index // columns) * (dial_size + dial_gap)
-                
-                normalized_data = max(min(neuron.b.data, 1), -1)
-                normalized_grad = max(min(neuron.b.grad, 1), -1)
-                
-                svg_content += create_dial(x, y, dial_size, normalized_data, normalized_grad, neuron.b.data)
-                
-                param_index += 1
-    
-    svg_content += '</g></svg>'
-    return svg_content
-
-def create_dial(x, y, size, normalized_data, normalized_grad, value):
-    dial = f'<g transform="translate({x}, {y})">'
-    
-    # Background circle
-    dial += f'<circle cx="{size/2}" cy="{size/2}" r="{size/2}" fill="white" stroke="#d0d0d0" stroke-width="1"/>'
-    
-    # Gradient arc
-    gradient_color = "#4CAF50" if normalized_grad > 0 else "#F44336"
-    end_angle = 180 + normalized_grad * 180
-    large_arc_flag = 1 if abs(normalized_grad) > 0.5 else 0
-    path = f"M{size/2},{size/2} L{size/2},0 A{size/2},{size/2} 0 {large_arc_flag},1 {size/2 + size/2*math.sin(math.radians(end_angle))},{size/2 - size/2*math.cos(math.radians(end_angle))} Z"
-    dial += f'<path d="{path}" fill="{gradient_color}" fill-opacity="0.3"/>'
-    
-    # Data indicator line
-    data_angle = 180 + normalized_data * 180
-    dial += f'<line x1="{size/2}" y1="{size/2}" x2="{size/2 + size/2*0.8*math.sin(math.radians(data_angle))}" y2="{size/2 - size/2*0.8*math.cos(math.radians(data_angle))}" stroke="black" stroke-width="2"/>'
-    
-    # Center dot
-    dial += f'<circle cx="{size/2}" cy="{size/2}" r="1" fill="black"/>'
-    
-    # Value text
-    dial += f'<text x="{size/2}" y="{size+10}" text-anchor="middle" font-size="{size/5}" fill="#333">{value:.2f}</text>'
-    
-    dial += '</g>'
-    return dial
-
-# ------------------------------------------------------------------------------------------
 # ----------------------------------------Dial--------------------------------------------
 # ------------------------------------------------------------------------------------------
 
@@ -1698,7 +1370,6 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     percentage = normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH)
     text_radius = (OUTER_RADIUS + INNER_RADIUS) / 2
     log_scale_min, log_scale_max = symlog_scale(SCALE_MIN, LINTHRESH), symlog_scale(SCALE_MAX, LINTHRESH)
-    pos_to_angle_func = partial(pos_to_angle, log_scale_min=log_scale_min, log_scale_max=log_scale_max, linthresh=LINTHRESH)
             
     START_ANGLE = math.radians(135)
     END_ANGLE = math.radians(45)
@@ -1753,7 +1424,8 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
                 transform=f"rotate({rotation} {label_pos[0]} {label_pos[1]})"
             )
         )
-    m_angle = pos_to_angle_func(m)    
+    
+    m_angle = pos_to_angle(m, log_scale_min, log_scale_max, LINTHRESH)    
     v_ticks = []    
     num_ticks = 20
 
@@ -1769,20 +1441,40 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
         v_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], 
                             stroke="#888", stroke_width=1))
 
+    show_m_bean = abs(m) > 1e-15
 
-    buffer_angle = math.radians(12)
-    text_arc_length = math.radians(40)
-    if m >= 0:
-        end_angle = m_angle - buffer_angle
-        start_angle = end_angle - text_arc_length
+    if show_m_bean:
+        buffer_angle = math.radians(12)
+        text_arc_length = math.radians(40)
+        if m >= 0:
+            end_angle = m_angle - buffer_angle
+            start_angle = end_angle - text_arc_length
+        else:
+            start_angle = m_angle + buffer_angle
+            end_angle = start_angle + text_arc_length
+
+        outer_bean_radius = m_text_radius * 1.15
+        inner_bean_radius = m_text_radius * 0.85    
+
+        m_path_text_radius = (outer_bean_radius + inner_bean_radius) / 2
+        
+        m_text_path = Path(id=f"{param_name}-m-text-path", fill="none")
+        m_text_path.M(SIZE/2 + m_path_text_radius * math.cos(start_angle), 
+                    SIZE/2 + m_path_text_radius * math.sin(start_angle))
+        m_text_path.A(m_path_text_radius, m_path_text_radius, 0, 0, 1, 
+                    SIZE/2 + m_path_text_radius * math.cos(end_angle), 
+                    SIZE/2 + m_path_text_radius * math.sin(end_angle))
+
+        bean_shape = create_bean_shape(SIZE/2, SIZE/2, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
+
+        m_shape, m_mask = create_shape_with_cutout_text(
+            bean_shape,
+            f"{m:.4f}",
+            SIZE/30,
+            text_path_id=f"{param_name}-m-text-path"
+        )
     else:
-        start_angle = m_angle + buffer_angle
-        end_angle = start_angle + text_arc_length
-
-    outer_bean_radius = m_text_radius * 1.15
-    inner_bean_radius = m_text_radius * 0.85
-
-    m_shape_mask, m_text_path = create_m_shape_and_mask(m, SIZE, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
+        m_shape = m_mask = m_text_path = None
 
     m_indicator = Line(
         x1=CENTER,
@@ -1899,14 +1591,14 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
                 ),
                 id="z-text-mask",
             ),            
-            sqrt_v_mask,
-            [m_text_path] if m_shape_mask else []          
+            sqrt_v_mask, m_mask,
+            m_text_path if show_m_bean else None,         
         ),
         circle(r=OUTER_RADIUS, fill="url(#dialGradient)", mask="url(#dialMask)"),
         G(
             circle(r=INNER_RADIUS, fill="white", stroke="none"),
             m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,
-            *(m_shape_mask if m_shape_mask else []), blue_arrow,
+            m_shape if show_m_bean else None, blue_arrow,
             sqrt_v_shape, data_text, z_background, z_cutout,                                                      
             m_indicator, center_circle,
             filter="url(#dropShadow)"
@@ -1919,33 +1611,11 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
             ),
             font_family="Arial, sans-serif", font_size=SIZE/10, text_anchor="middle", fill="black"
         ),
-        id=f"dial-{param_name}",
+        id=param_name,
         width=SIZE, height=SIZE,
         viewBox=f"0 0 {SIZE} {SIZE}",                
     )     
 
-def create_m_shape_and_mask(m, size, outer_bean_radius, inner_bean_radius, start_angle, end_angle):
-    if abs(m) <= 1e-8:
-        return None, None
-
-    m_path_text_radius = (outer_bean_radius + inner_bean_radius) / 2
-    center = size / 2
-
-    m_text_path = Path(id="m-text-path", fill="none")
-    m_text_path.M(size/2 + m_path_text_radius * math.cos(start_angle), 
-                size/2 + m_path_text_radius * math.sin(start_angle))
-    m_text_path.A(m_path_text_radius, m_path_text_radius, 0, 0, 1, 
-                size/2 + m_path_text_radius * math.cos(end_angle), 
-                size/2 + m_path_text_radius * math.sin(end_angle))
-
-    bean_shape = create_bean_shape(center, center, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
-
-    return create_shape_with_cutout_text(
-        bean_shape,
-        f"{m:.4f}",
-        size/30,
-        text_path_id="m-text-path"
-    ), m_text_path
 
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
     attributes = {
@@ -2092,6 +1762,11 @@ def create_arrow_path(center_x, center_y, gradient, max_gradient, m_angle, inner
     return arrow_path
 
 
+
+# -------------------------------------------------------------------------------------------------
+# Parameter Dial Testing
+# -------------------------------------------------------------------------------------------------
+
 @rt('/parameter_dial')
 def get():
     random_data = random.uniform(-1, 1)
@@ -2113,7 +1788,7 @@ def get():
             ),
             cls="mt-1 mb-4"
         ),
-        create_parameter_dial(data=random_data, gradient=0.0000, m=random_m, v=random_v),
+        create_parameter_dial(param_name="parameter-dial", data=random_data, gradient=0.0000, m=random_m, v=random_v),
         cls="p-6 rounded-lg shadow-md mx-auto min-h-screen bg-[#e0e8d8] text-black"
     )
 
@@ -2133,7 +1808,7 @@ async def update_dial(request: Request):
         v = random.uniform(0.001, 0.01)
     
     random_data = random.uniform(-1, 1)
-    return create_parameter_dial(data=random_data, gradient=gradient, m=m, v=v)
+    return create_parameter_dial(param_name="parameter-dial", data=random_data, gradient=gradient, m=m, v=v)
 
 
 # Run the app
