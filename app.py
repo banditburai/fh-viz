@@ -391,6 +391,7 @@ class Visualizer:
         self.test_split = []
         self.batch_size = 20
         self.is_training = False
+        self.history = []
         self.initialize_model()
 
     def initialize_model(self):
@@ -406,6 +407,7 @@ class Visualizer:
         self.step_count = 0
         self.train_losses = []
         self.val_losses = []
+        self.history = []
         
         # Reset model parameters to initial values
         for p in self.model.parameters():
@@ -450,15 +452,27 @@ class Visualizer:
                 X_val, y_val = zip(*self.val_split)
                 val_loss = self.loss_fun(X_val, y_val)
                 self.val_losses.append(val_loss.data)
-        
-        return self.get_current_step()
+                    
+        current_step = self.get_current_step()
+        self.history.append(current_step)
+        return current_step
 
     def get_current_step(self):
+        param_state = {}
+        if self.model:
+            for i, p in enumerate(self.model.parameters()):
+                param_state[f'param_{i}'] = {
+                    'value': p.data.item() if hasattr(p.data, 'item') else float(p.data),
+                    'grad': p.grad.item() if (p.grad is not None and hasattr(p.grad, 'item')) else float(p.grad) if p.grad is not None else 0,
+                    'm': float(getattr(p, 'm', 0)),
+                    'v': float(getattr(p, 'v', 0))
+                }
         return {
             'step_count': self.step_count,
             'train_loss': f"{self.train_losses[-1]:.6f}" if self.train_losses else "---",
             'val_loss': f"{self.val_losses[-1]:.6f}" if self.val_losses and len(self.val_losses) > 0 else "---",
-            'is_training': self.is_training
+            'is_training': self.is_training,
+            'param_state': param_state
         }
 
     def loss_fun(self, X, y):
@@ -826,6 +840,63 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 """
 
+def create_main_parameter_dials(visualizer, container_width=800, container_height=400):
+    if not visualizer.model:
+        return Div("No model available", id="parameter-dials")
+
+    dial_size = 60
+    dial_gap = 10
+    
+    total_params = sum(len(neuron.w) + 1 for layer in visualizer.model.layers for neuron in layer.neurons)
+    columns = max(1, (container_width + dial_gap) // (dial_size + dial_gap))
+    rows = math.ceil(total_params / columns)
+    
+    grid_width = columns * (dial_size + dial_gap) - dial_gap
+    grid_height = rows * (dial_size + dial_gap) - dial_gap
+    
+    start_x = (container_width - grid_width) / 2
+    start_y = (container_height - grid_height) / 2    
+    
+    dials = []
+    for i, layer in enumerate(visualizer.model.layers):
+        for j, neuron in enumerate(layer.neurons):
+            for k, w in enumerate(neuron.w):
+                dials.append(resize_dial(f"layer{i}_neuron{j}_weight{k}", w, dial_size))
+            dials.append(resize_dial(f"layer{i}_neuron{j}_bias", neuron.b, dial_size))
+    
+    positioned_dials = [
+        G(dial, transform=f"translate({start_x + (i % columns) * (dial_size + dial_gap)}, {start_y + (i // columns) * (dial_size + dial_gap)})")
+        for i, dial in enumerate(dials[:columns * rows])
+    ]
+
+    svg_width = max(container_width, grid_width + 2 * start_x)
+    svg_height = max(container_height, grid_height + 2 * start_y)
+    
+    return Svg(
+        Rect(x=0, y=0, width=svg_width, height=svg_height, fill="#f0f0f0"),
+        *positioned_dials,
+        width="100%", height="100%", 
+        viewBox=f"0 0 {svg_width} {svg_height}",
+        preserveAspectRatio="xMidYMid meet",
+        id="parameter-dials"
+    )
+
+def resize_dial(param_name, param, size):
+    dial = create_parameter_dial(
+        param_name=param_name,
+        data=float(param.data),
+        gradient=float(param.grad) if param.grad is not None else 0,
+        m=float(getattr(param, 'm', 0)),
+        v=float(getattr(param, 'v', 0)),
+        beta1=0.9
+    )
+    if dial is not None:
+        dial.attrs['width'] = size
+        dial.attrs['height'] = size
+        return dial
+    else:
+        print(f"Warning: Dial for {param_name} is None")
+        return None
 
 @rt('/')
 def get():
@@ -875,9 +946,10 @@ def get():
                 ),
                 # Graph Visualization Section
                 Div(
-                    H3("Computation Graph", cls="text-lg font-bold mb-2"),
-                    Div(id="graph-viz", cls="h-[200px] bg-white border-2 border-gray-300 rounded-lg shadow-lg flex items-center justify-center p-4"),
-                    id="graph-section"
+                    H3("Optimizer State", cls="text-xl font-semibold mb-2"),
+                    create_main_parameter_dials(visualizer, container_width=800, container_height=600),
+                    id="optimizer-state-container",
+                    cls="bg-white p-4 rounded-lg shadow-md"
                 ),
                 id="training-and-graph-section",
                 cls="w-full md:w-3/4"
@@ -1000,8 +1072,6 @@ def create_dataset_svg(data):
 
     return svg_content
 
-
-
 @rt('/generate_dataset')
 async def post():
     visualizer.generate_dataset()
@@ -1054,48 +1124,6 @@ async def post():
         cls="w-full"
     )
 
-
-
-def create_graph_svg(graph_data):
-    svg_content = []
-    
-    # Create nodes
-    for index, node in enumerate(graph_data['nodes']):
-        x = 50 + (index % 5) * 100
-        y = 50 + (index // 5) * 100
-        
-        g = G(
-            Circle(r=20, fill='white', stroke='black'),
-            Text(node['value'].toFixed(4), 
-                 text_anchor='middle', 
-                 dominant_baseline='middle'),
-            id=f"node-{node['id']}",
-            transform=f"translate({x}, {y})"
-        )
-        svg_content.append(g)
-    
-    # Create edges
-    for edge in graph_data['edges']:
-        from_node = f"#node-{edge['from']}"
-        to_node = f"#node-{edge['to']}"
-        line = Line(x1=0, y1=0, x2=0, y2=0,  # These will be set by JavaScript
-                    stroke='black',
-                    marker_end='url(#arrowhead)')
-        svg_content.append(line)
-    
-    return Svg(*svg_content, 
-               width="100%", height="100%", viewBox="0 0 600 400")
-
-
-@rt('/get_graph')
-async def get():
-    graph_data = visualizer.get_graph_data()
-    return create_graph_svg(graph_data)
-
-@rt('/get_dataset_viz')
-async def get():    
-    return Div("Dataset visualization placeholder")
-
 @rt('/reset')
 async def post():
     visualizer.reset()
@@ -1105,69 +1133,317 @@ async def post():
         'val_loss': "---"
     }
 
+# ------------------------------------------------------------------------------------------
+# -------------------------AdamW Optimizer----------------------------------------------
+# ------------------------------------------------------------------------------------------
+
+@rt('/update_step')
+async def post(request: Request):
+    step = int((await request.form())['step'])
+    return create_visualization_for_step(step)
+
+@rt('/prev_step')
+async def post(request: Request):
+    current_step = int((await request.form())['current_step'])
+    new_step = max(0, current_step - 1)
+    return create_visualization_for_step(new_step)
+
+@rt('/next_step')
+async def post(request: Request):
+    current_step = int((await request.form())['current_step'])
+    new_step = min(99, current_step + 1)  # Assuming 100 steps total
+    return create_visualization_for_step(new_step)
+
+def create_visualization_for_step(step):
+    step_data, param_state = visualizer.history[step]
+    dials = create_mocked_param_dials(param_state)
+    progress = progress_tracker(step_data['step_count'], step_data['train_loss'], step_data['val_loss'])
+    return Div(
+        progress,
+        dials,
+        id="visualization"
+    )
+
+param_dial_script = """
+document.body.addEventListener('htmx:sseMessage', function(evt) {
+    if (evt.detail.data === "optimization_complete") {
+        document.getElementById("run-optimization-btn").innerHTML = "Run Optimization";
+        document.getElementById("run-optimization-btn").disabled = false;
+    } else {
+        try {
+            const updateData = JSON.parse(evt.detail.data);
+            updateProgressTracker(updateData);
+            // We'll handle dial updates later
+            // updateParameterDials(updateData.params);
+        } catch (error) {
+            console.error("Error parsing SSE data:", error);
+        }
+    }
+});
+
+function updateProgressTracker(data) {
+    const progressTracker = document.getElementById("progress-tracker");
+    const trainLoss = isNaN(data.train_loss) ? data.train_loss : parseFloat(data.train_loss).toFixed(6);
+    const valLoss = data.val_loss === "---" ? "---" : parseFloat(data.val_loss).toFixed(6);
+    progressTracker.innerHTML = `Step ${data.step}: Train Loss: ${trainLoss}, Val Loss: ${valLoss}`;
+}
+
+htmx.on("htmx:afterRequest", function(event) {
+    if (event.detail.elt.id === "run-optimization-btn") {
+        event.detail.elt.innerHTML = "Optimizing...";
+        event.detail.elt.disabled = true;
+    }
+});
+"""
+
+def create_mocked_param_dials(num_dials=51, dial_size=60, container_width=800, container_height=400):
+    dial_gap = 10
+    
+    # Calculate the number of columns and rows that can fit in the container
+    columns = max(1, (container_width + dial_gap) // (dial_size + dial_gap))
+    rows = max(1, (container_height + dial_gap) // (dial_size + dial_gap))
+    
+    # Adjust the number of dials if there's not enough space
+    num_dials = min(num_dials, columns * rows)
+    
+    # Recalculate rows based on the actual number of dials
+    rows = math.ceil(num_dials / columns)
+    
+    # Calculate the actual grid dimensions
+    grid_width = columns * (dial_size + dial_gap) - dial_gap
+    grid_height = rows * (dial_size + dial_gap) - dial_gap
+    
+    # Center the grid within the container
+    start_x = (container_width - grid_width) / 2
+    start_y = (container_height - grid_height) / 2    
+    
+    dials = []
+    for i in range(num_dials):
+        col = i % columns
+        row = i // columns
+        x = start_x + col * (dial_size + dial_gap)
+        y = start_y + row * (dial_size + dial_gap)
+        param_name = f"param_{i}"        
+        dial = create_parameter_dial(param_name, data=0, gradient=0, m=0, v=0, beta1=0.9)
+        if dial is not None:
+            dial.attrs['width'] = dial_size
+            dial.attrs['height'] = dial_size
+            dials.append(G(dial, transform=f"translate({x}, {y})"))
+        else:
+            print(f"Warning: Dial {i} is None")
+    
+    svg_width = max(container_width, grid_width + 2 * start_x)
+    svg_height = max(container_height, grid_height + 2 * start_y)
+    
+    return Svg(
+        Rect(x=0, y=0, width=svg_width, height=svg_height, fill="#f0f0f0"),
+        *dials,
+        width="100%", height="100%", 
+        viewBox=f"0 0 {svg_width} {svg_height}",
+        preserveAspectRatio="xMidYMid meet"
+    )
+
+def create_visualization(history):
+    try:
+        svg_content = []
+        for i, (step_data, param_state) in enumerate(history):
+            dials = create_mocked_param_dials(param_state)
+            progress = progress_tracker(step_data['step_count'], step_data['train_loss'], step_data['val_loss'])
+            svg_content.append(Div(progress, dials, id=f"step-{i}", cls="hidden" if i > 0 else ""))
+        
+        return Div(
+            *svg_content,
+            Div(
+                Input(type="range", min="0", max=f"{len(history)-1}", value="0", cls="w-full", 
+                      hx_trigger="input", hx_post="/update_step", hx_target="#visualization"),
+                cls="mt-4"
+            ),
+            Button("Previous", hx_post="/prev_step", hx_target="#visualization"),
+            Button("Next", hx_post="/next_step", hx_target="#visualization"),
+            id="visualization"
+        )
+    except Exception as e:
+        print(f"Error in create_visualization: {str(e)}")
+        return Div(f"Error: {str(e)}", id="visualization")
+
+@rt('/run_adamw')
+async def post():
+    async def event_stream():
+        visualizer.reset()
+        visualizer.generate_dataset()    
+
+        for step in range(100):  # Run for 100 steps
+            visualizer.is_training = True
+            visualizer.train_step()
+            visualizer.is_training = False
+            
+            step_data, param_state = visualizer.history[-1]
+            
+            update_data = {
+                'step': step_data['step_count'],
+                'train_loss': step_data['train_loss'],
+                'val_loss': step_data['val_loss'],
+                'params': param_state
+            }
+            
+            yield f"data: {json.dumps(update_data)}\n\n"
+
+            if step % 5 == 0 or step == 99:  # Update every 5 steps and on the last step
+                await asyncio.sleep(0.1)  # Small delay to control update rate
+
+        yield "event: complete\ndata: optimization_complete\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+def update_dials(param_state):
+    dials = []
+    for param_name, param_data in param_state.items():
+        dial = create_parameter_dial(
+            data=param_data['value'],
+            gradient=param_data['grad'],
+            m=param_data['m'],
+            v=param_data['v'],
+            beta1=0.9  # Assuming beta1 is constant
+        )
+        dial.attrs['width'] = 60
+        dial.attrs['height'] = 60
+        dials.append(dial)
+    
+    return create_mocked_param_dials(num_dials=len(dials), dial_size=60, container_width=800, container_height=400, custom_dials=dials)
 
 @rt('/adamw')
 async def get():    
-    return Titled("AdamW Optimizer Explainer",
-        Style("""
-            body { font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 800px; margin: 0 auto; }
-            h1, h2 { color: #333; }
-            pre { background-color: #f4f4f4; padding: 10px; border-radius: 5px; }
-            .math { font-style: italic; }
-        """),
+    return Div(
         Link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css", integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+", crossorigin="anonymous"),
-        Script(defer=True, src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js", integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg", crossorigin="anonymous"),
-        # Script(defer=True, src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js", integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk", crossorigin="anonymous", onload="renderMathInElement(document.body);"),
-        H2("1. Initialization"),
-        P("AdamW is initialized with the following parameters:"),
-        Ul(
-            Li(Span("lr", cls="math"), ": learning rate (default: 0.1)"),
-            Li(Span("β₁, β₂", cls="math"), ": exponential decay rates for moment estimates (default: 0.9, 0.95)"),
-            Li(Span("ε", cls="math"), ": small constant for numerical stability (default: 1e-8)"),
-            Li(Span("weight_decay", cls="math"), ": weight decay factor (default: 0.0)")
+        Script(src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js", integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg", crossorigin="anonymous"),
+        Script("""
+            document.addEventListener("DOMContentLoaded", function() {
+                document.querySelectorAll('.math').forEach(function(element) {
+                    katex.render(element.textContent, element, {
+                        throwOnError: false
+                    });
+                });
+            });
+        """),
+        Script(param_dial_script),       
+        Div(
+            H1("AdamW Optimizer", cls="text-3xl font-bold mb-6 text-center text-blue-600"),
+            
+            # Overall View
+            Div(
+           H2("AdamW in Action", cls="text-2xl font-semibold mb-4"),
+            P("Watch how AdamW optimizes parameters over multiple steps:", cls="mb-4"),
+            Div(
+                progress_tracker(0, "---", "---"),
+                create_mocked_param_dials(),
+                id="visualization-container", 
+                cls="mb-4"
+            ),
+            Button("Run Optimization", 
+                id="run-optimization-btn",
+                hx_post="/run_adamw", 
+                hx_target="#visualization-container",
+                hx_trigger="click",
+                hx_sse="true",
+                cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-sm"),
+            cls="bg-gray-100 p-6 rounded-lg shadow-md mb-8"
         ),
-        P("For each parameter ", Span("p", cls="math"), ", we initialize:"),
-        Ul(
-            Li(Span("m = 0", cls="math"), " (first moment vector)"),
-            Li(Span("v = 0", cls="math"), " (second moment vector)")
+            
+            # Step-by-Step Breakdown
+            Div(
+                H2("Algorithm Breakdown", cls="text-2xl font-semibold mb-4"),
+                Div(id="step-breakdown", cls="mb-4"),
+                Button("Next Step", hx_post="/next_step", hx_target="#step-breakdown", cls="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-sm"),
+                cls="bg-gray-100 p-6 rounded-lg shadow-md mb-8"
+            ),
+            
+            # Hyperparameter Deep Dives
+            Div(
+                H2("Explore Hyperparameters", cls="text-2xl font-semibold mb-4"),
+                Div(
+                    Button("Learning Rate", hx_get="/hyperparam/lr", hx_target="#hyperparam-details"),
+                    Button("Beta Values", hx_get="/hyperparam/betas", hx_target="#hyperparam-details"),
+                    Button("Epsilon", hx_get="/hyperparam/epsilon", hx_target="#hyperparam-details"),
+                    Button("Weight Decay", hx_get="/hyperparam/weight_decay", hx_target="#hyperparam-details"),
+                    cls="flex flex-wrap gap-2 mb-4"
+                ),
+                Div(id="hyperparam-details", cls="mt-4"),
+                cls="bg-gray-100 p-6 rounded-lg shadow-md mb-8"
+            ),
+            
+            # Advanced Interactions (initially hidden, can be revealed later)
+            Div(id="advanced-interactions", cls="hidden"),
+            
+            cls="max-w-6xl mx-auto px-4 py-8"
         ),
-        H2("2. Update Step"),
-        P("For each parameter ", Span("p", cls="math"), " and its gradient ", Span("g", cls="math"), ":"),
-        Ol(
-            Li("Update biased first moment estimate:", Br(),
-               Span("m = β₁ * m + (1 - β₁) * g", cls="math")),
-            Li("Update biased second raw moment estimate:", Br(),
-               Span("v = β₂ * v + (1 - β₂) * g²", cls="math")),
-            Li("Correct bias in first moment:", Br(),
-               Span("m̂ = m / (1 - β₁ᵗ)", cls="math")),
-            Li("Correct bias in second moment:", Br(),
-               Span("v̂ = v / (1 - β₂ᵗ)", cls="math")),
-            Li("Compute the parameter update:", Br(),
-               Span("Δp = -lr * (m̂ / (√v̂ + ε) + weight_decay * p)", cls="math")),
-            Li("Apply the update:", Br(),
-               Span("p = p + Δp", cls="math"))
-        ),
-        H2("3. Key Concepts"),
-        Ul(
-            Li(Strong("Adaptive Learning Rate"), ": The effective learning rate is adjusted based on the first and second moments of the gradients."),
-            Li(Strong("Momentum"), ": The first moment (m) provides a form of momentum, helping to smooth out updates."),
-            Li(Strong("RMSprop-like Scaling"), ": The second moment (v) scales the update, similar to RMSprop, helping to handle different magnitudes of gradients."),
-            Li(Strong("Bias Correction"), ": The bias correction terms (1 - β₁ᵗ and 1 - β₂ᵗ) help to reduce bias in the early steps of training."),
-            Li(Strong("Weight Decay"), ": Unlike standard Adam, AdamW applies weight decay directly to the parameters, which can improve generalization.")
-        ),
-        H2("4. Visualization"),
-        P("The optimizer state table in the main view shows:"),
-        Ul(
-            Li(Strong("param"), ": Current parameter value"),
-            Li(Strong("-m/sqrt(v)"), ": The main component of the update (before applying learning rate)"),
-            Li(Strong("grad"), ": Current gradient"),
-            Li(Strong("m"), ": First moment estimate"),
-            Li(Strong("sqrt(v)"), ": Square root of the second moment estimate")
-        ),
-        P("Green values are positive, red are negative, helping to visualize the direction of updates and gradient flow.")                 
+        cls="mx-auto min-h-screen bg-[#e0e8d8] text-gray-800"
     )
 
 
+
+
+
+
+
+
+
+    #         Div(
+    #             H2("Inputs and Initialization", cls="text-2xl font-semibold mb-4 text-blue-500"),
+    #             P("AdamW is initialized with the following parameters:", cls="mb-4"),
+    #             Ul(
+    #                 Li(Span("lr (\\alpha)", cls="math font-semibold"), ": learning rate", cls="mb-2"),
+    #                 Li(Span("\\beta_1, \\beta_2", cls="math font-semibold"), ": coefficients for computing running averages of gradient and its square", cls="mb-2"),
+    #                 Li(Span("eps", cls="math font-semibold"), ": term added to the denominator to improve numerical stability", cls="mb-2"),
+    #                 Li(Span("weight\\_decay", cls="math font-semibold"), ": weight decay (L2 penalty)", cls="mb-2"),
+    #                 cls="list-disc list-inside mb-6"
+    #             ),
+    #             P("Initialize:", cls="mb-4"),
+    #             Ul(
+    #                 Li(Span("m_0 = 0", cls="math"), " (first moment vector)", cls="mb-2"),
+    #                 Li(Span("v_0 = 0", cls="math"), " (second moment vector)", cls="mb-2"),
+    #                 Li(Span("\\hat{v}_0^{max} = 0", cls="math"), " (if using AMSGrad)", cls="mb-2"),
+    #                 cls="list-disc list-inside mb-6"
+    #             ),
+    #             cls="bg-gray-100 p-6 rounded-lg shadow-md mb-8"
+    #         ),
+    #         Div(
+    #             H2("Update Step", cls="text-2xl font-semibold mb-4 text-blue-500"),
+    #             P("For each parameter ", Span("\\theta", cls="math"), " and its gradient ", Span("g", cls="math"), ":", cls="mb-4"),
+    #             Ol(
+    #                 Li("Apply weight decay:", 
+    #                    Div(Span("\\theta_t \\leftarrow \\theta_{t-1} - lr \\cdot weight\\_decay \\cdot \\theta_{t-1}", cls="math block my-2 text-lg")), 
+    #                    cls="mb-4"),
+    #                 Li("Update biased first moment estimate:", 
+    #                    Div(Span("m_t = \\beta_1 \\cdot m_{t-1} + (1 - \\beta_1) \\cdot g_t", cls="math block my-2 text-lg")), 
+    #                    cls="mb-4"),
+    #                 Li("Update biased second raw moment estimate:", 
+    #                    Div(Span("v_t = \\beta_2 \\cdot v_{t-1} + (1 - \\beta_2) \\cdot g_t^2", cls="math block my-2 text-lg")), 
+    #                    cls="mb-4"),
+    #                 Li("Correct bias in first moment:", 
+    #                    Div(Span("\\hat{m}_t = \\frac{m_t}{1 - \\beta_1^t}", cls="math block my-2 text-lg")), 
+    #                    cls="mb-4"),
+    #                 Li("Correct bias in second moment:", 
+    #                    Div(Span("\\hat{v}_t = \\frac{v_t}{1 - \\beta_2^t}", cls="math block my-2 text-lg")), 
+    #                    cls="mb-4"),
+    #                 Li("If using AMSGrad, update max of ̂v:", 
+    #                    Div(Span("\\hat{v}_t^{max} = max(\\hat{v}_t^{max}, \\hat{v}_t)", cls="math block my-2 text-lg")), 
+    #                    cls="mb-4"),
+    #                 Li("Compute the parameter update:", 
+    #                    Div(Span("\\theta_t \\leftarrow \\theta_t - lr \\cdot \\frac{\\hat{m}_t}{\\sqrt{\\hat{v}_t^{max}} + eps}", cls="math block my-2 text-lg")), 
+    #                    cls="mb-4"),
+    #                 cls="list-decimal list-inside mb-6"
+    #             ),
+    #             cls="bg-gray-100 p-6 rounded-lg shadow-md"
+    #         ),
+    #         cls="max-w-4xl mx-auto px-4 py-8"
+    #     ),
+    #     cls="mx-auto min-h-screen bg-[#e0e8d8] text-gray-800"
+    # )
+
+
+# ------------------------------------------------------------------------------------------
+# -------------------------Network Explainer Template--------------------------------------
+# ------------------------------------------------------------------------------------------
 @rt('/model_info')
 def get(request: Request):
     page = int(request.query_params.get('page', '1'))
@@ -1408,13 +1684,268 @@ def create_dial(x, y, size, normalized_data, normalized_grad, value):
 # ----------------------------------------Dial--------------------------------------------
 # ------------------------------------------------------------------------------------------
 
-SIZE = 200
-RING_WIDTH = SIZE / 8
-OUTER_RADIUS = SIZE / 2 - 5
-INNER_RADIUS = OUTER_RADIUS - RING_WIDTH
-CENTER = SIZE / 2
-SCALE_MIN, SCALE_MAX = -1.0, 1.0
-LINTHRESH = 0.01
+def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9):        
+    SIZE = 200
+    RING_WIDTH = SIZE / 8
+    OUTER_RADIUS = SIZE / 2 - 5
+    INNER_RADIUS = OUTER_RADIUS - RING_WIDTH
+    CENTER = SIZE / 2
+    SCALE_MIN, SCALE_MAX = -1.0, 1.0
+    LINTHRESH = 0.01
+    eps = 1e-8
+    z = m / (math.sqrt(v) + eps) if v != 0 else 0
+    
+    percentage = normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH)
+    text_radius = (OUTER_RADIUS + INNER_RADIUS) / 2
+    log_scale_min, log_scale_max = symlog_scale(SCALE_MIN, LINTHRESH), symlog_scale(SCALE_MAX, LINTHRESH)
+    pos_to_angle_func = partial(pos_to_angle, log_scale_min=log_scale_min, log_scale_max=log_scale_max, linthresh=LINTHRESH)
+            
+    START_ANGLE = math.radians(135)
+    END_ANGLE = math.radians(45)
+    start_x, start_y = angle_to_coords(START_ANGLE, OUTER_RADIUS, CENTER)
+    end_x, end_y = angle_to_coords(END_ANGLE, OUTER_RADIUS, CENTER)
+    
+    knob_angle = math.radians(180 + percentage * 1.8)        
+    knob_width, knob_length = RING_WIDTH, RING_WIDTH * 1.1
+    knob_x, knob_y = angle_to_coords(knob_angle, OUTER_RADIUS, CENTER)
+    knob_end_x, knob_end_y = angle_to_coords(knob_angle, OUTER_RADIUS - knob_length, CENTER)
+     
+
+    sqrt_v = math.sqrt(v)
+    outer_m_radius = INNER_RADIUS * 0.65 
+    inner_v_radius = outer_m_radius * 0.6 
+    m_text_radius = (outer_m_radius + inner_v_radius) * .5
+        
+    m_circle = Circle(cx=CENTER, cy=CENTER, r=outer_m_radius, fill="none", stroke="#888", stroke_width=1, mask=f"url(#top-half-mask)")    
+    v_circle = Circle(cx=CENTER, cy=CENTER, r=inner_v_radius, fill="none", stroke="#888", stroke_width=1, mask=f"url(#top-half-mask)")
+    
+    m_ticks = []
+    m_labels = []
+    m_values = [-1.00, -0.20, -0.02, 0.00, 0.02, 0.20, 1.00]
+    label_distance = 1
+
+    for i, value in enumerate(m_values):
+        angle = math.pi + (i / (len(m_values) - 1)) * math.pi
+        tick_start = angle_to_coords(angle, outer_m_radius, CENTER)
+        tick_end = angle_to_coords(angle, outer_m_radius + 5, CENTER)
+        m_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], stroke="#888", stroke_width=1))                
+        text_width = len(f"{value:.2f}") * SIZE / 35 
+                
+        if angle > math.pi:  # Left side
+            label_radius = outer_m_radius + label_distance + text_width / 2
+        else:  # Right side
+            label_radius = outer_m_radius + label_distance + text_width / 2
+        
+        label_pos = angle_to_coords(angle, label_radius, CENTER)
+                
+        rotation = (angle - math.pi) * 180 / math.pi
+        if rotation > 90 or rotation < -90:
+            rotation += 180
+        
+        m_labels.append(
+            Text(
+                f"{value:.2f}",
+                x=label_pos[0], y=label_pos[1],
+                font_size=SIZE/35,
+                fill="#888",
+                text_anchor="middle",
+                dominant_baseline="central",
+                transform=f"rotate({rotation} {label_pos[0]} {label_pos[1]})"
+            )
+        )
+    m_angle = pos_to_angle_func(m)    
+    v_ticks = []    
+    num_ticks = 20
+
+    for i in range(-num_ticks, num_ticks + 1):        
+        angle = m_angle + (i / num_ticks) * (math.pi / 2)    
+        angle = angle % (2 * math.pi)
+        if angle < math.pi:
+            angle += math.pi
+
+        tick_start = angle_to_coords(angle, inner_v_radius, CENTER)
+        tick_end = angle_to_coords(angle, inner_v_radius - 5, CENTER)
+               
+        v_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], 
+                            stroke="#888", stroke_width=1))
+
+
+    buffer_angle = math.radians(12)
+    text_arc_length = math.radians(40)
+    if m >= 0:
+        end_angle = m_angle - buffer_angle
+        start_angle = end_angle - text_arc_length
+    else:
+        start_angle = m_angle + buffer_angle
+        end_angle = start_angle + text_arc_length
+
+    outer_bean_radius = m_text_radius * 1.15
+    inner_bean_radius = m_text_radius * 0.85
+
+    m_shape_mask, m_text_path = create_m_shape_and_mask(m, SIZE, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
+
+    m_indicator = Line(
+        x1=CENTER,
+        y1=CENTER,
+        x2=angle_to_coords(m_angle, outer_m_radius * 1.15, CENTER)[0],
+        y2=angle_to_coords(m_angle, outer_m_radius * 1.15, CENTER)[1],
+        stroke="#372572", stroke_width=2
+    )
+    center_circle = Circle(
+    cx=SIZE/2,
+    cy=SIZE/2,
+    r=3,
+    fill="#372572"
+)
+        
+    arrow_length = abs(gradient) * (1 - beta1) * (OUTER_RADIUS - INNER_RADIUS)        
+    max_arrow_length = (OUTER_RADIUS - INNER_RADIUS) * 0.5
+    arrow_length = min(arrow_length, max_arrow_length)
+            
+    max_gradient = 5.0
+    blue_arrow = create_arrow_path(CENTER, CENTER, gradient, max_gradient, m_angle, INNER_RADIUS, SIZE)
+
+    sqrt_v_width = SIZE * 0.15
+    sqrt_v_height = SIZE * 0.05
+    sqrt_v_x = SIZE/2 - sqrt_v_width/2
+    sqrt_v_y = SIZE/2 + SIZE/70
+    
+    sqrt_v_shape = create_convex_shape(sqrt_v_x, sqrt_v_y, sqrt_v_width, sqrt_v_height)
+        
+    sqrt_v_text_path = Path(id="sqrt-v-text-path", fill="none")
+    sqrt_v_text_path.M(sqrt_v_x, sqrt_v_y + sqrt_v_height/2)
+    sqrt_v_text_path.Q(sqrt_v_x + sqrt_v_width/2, sqrt_v_y + sqrt_v_height + sqrt_v_height/2, 
+                    sqrt_v_x + sqrt_v_width, sqrt_v_y + sqrt_v_height/2)
+    
+    sqrt_v_shape, sqrt_v_mask = create_shape_with_cutout_text(
+        sqrt_v_shape,
+        f"{sqrt_v:.4f}",
+        SIZE/30, 
+        text_path_id="sqrt-v-text-path"
+    )
+ 
+    gradient_defs = {
+        'low': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
+        'mid': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
+        'high': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
+    }
+
+    gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'    
+
+    gradient_def = LinearGradient(
+        *[Stop(offset=f"{i/(len(gradient_defs[gradient_key])-1)*100}%", 
+               style=f"stop-color:{color};stop-opacity:1")
+          for i, color in enumerate(gradient_defs[gradient_key])],
+        id="dialGradient", x1="0%", y1="0%", x2="100%", y2="100%",
+    )
+
+    mask_path = Path(fill="black").M(SIZE/2, SIZE/2).L(start_x, start_y).A(OUTER_RADIUS, OUTER_RADIUS, 0, 1, 0, end_x, end_y).Z()
+
+    knob_path = Path(fill="white").M(knob_x, knob_y)
+    knob_path.L(knob_end_x + knob_width/2 * math.sin(knob_angle), knob_end_y - knob_width/2 * math.cos(knob_angle))
+    knob_path.L(knob_end_x - knob_width/2 * math.sin(knob_angle), knob_end_y + knob_width/2 * math.cos(knob_angle))
+    knob_path.Z()
+    
+    z_color = "#4CAF50" if z > 0 else "#F44336"
+    z_triangle = "▲" if z > 0 else "▼"    
+    rect_width, rect_height = SIZE * 0.4, SIZE * 0.07
+    rect_x = SIZE / 2 - rect_width / 2
+    rect_y = SIZE / 2 + INNER_RADIUS / 1.8
+
+    rect_attrs = dict(
+        x=rect_x, y=rect_y,
+        width=rect_width, height=rect_height,
+        rx=rect_height / 2
+    )
+
+    z_background = Rect(fill=z_color, **rect_attrs, opacity=0.8)
+    z_text = Text(
+        f"{z_triangle} {abs(z):.4f}",
+        x=SIZE / 2, y=rect_y + rect_height / 2,
+        font_family="Arial, sans-serif", font_size=SIZE / 16, font_weight="bold",
+        text_anchor="middle", dominant_baseline="central", fill="white"
+    )        
+    z_cutout = Rect(fill="white", mask="url(#z-text-mask)", **rect_attrs)
+
+    data_text = Text(
+        f"{data:.4f}", x=SIZE/2, y=SIZE/2 + INNER_RADIUS/2.5,
+        font_family="Arial, sans-serif", font_size=SIZE/8, font_weight="bold",
+        text_anchor="middle", dominant_baseline="central", fill="black"
+    )
+
+    text_path = Path(id="textPath", stroke="purple", stroke_width=2, fill="none")
+    text_path.M(*angle_to_coords(math.radians(135), text_radius, CENTER))
+    text_path.A(text_radius, text_radius, 0, 0, 0, *angle_to_coords(math.radians(45), text_radius, CENTER))
+
+    circle = partial(Circle, cx=CENTER, cy=CENTER)
+
+    return Svg(
+        Defs(
+            gradient_def,
+            Mask(Rect(x=0, y=0, width=SIZE, height=SIZE, fill="white"), mask_path, id="dialMask"),
+            Mask(Rect(x=0, y=0, width=SIZE, height=SIZE, fill="white"),
+                 Rect(x=0, y=CENTER, width=SIZE, height=CENTER, fill="black"),
+                 id="top-half-mask"
+                 ),
+            Filter(FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"), id="dropShadow",),
+            text_path, m_text_path, sqrt_v_text_path,
+            Mask(                
+                Rect(fill="black", **rect_attrs),
+                Text(
+                    f"{z_triangle} {abs(z):.4f}",
+                    x=SIZE/2, y=rect_y + rect_height/2,
+                    font_family="Arial, sans-serif", font_size=SIZE/18, font_weight="bold",
+                    text_anchor="middle", dominant_baseline="central", fill="white"
+                ),
+                id="z-text-mask",
+            ),            
+            sqrt_v_mask,
+            [m_text_path] if m_shape_mask else []          
+        ),
+        circle(r=OUTER_RADIUS, fill="url(#dialGradient)", mask="url(#dialMask)"),
+        G(
+            circle(r=INNER_RADIUS, fill="white", stroke="none"),
+            m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,
+            *(m_shape_mask if m_shape_mask else []), blue_arrow,
+            sqrt_v_shape, data_text, z_background, z_cutout,                                                      
+            m_indicator, center_circle,
+            filter="url(#dropShadow)"
+        ),        
+       
+        Text(
+            TextPath(
+                Tspan(f"{gradient:.4f}", dy="0.4em"),                
+                href="#textPath", startOffset="50%",
+            ),
+            font_family="Arial, sans-serif", font_size=SIZE/10, text_anchor="middle", fill="black"
+        ),
+        id=f"dial-{param_name}",
+        width=SIZE, height=SIZE,
+        viewBox=f"0 0 {SIZE} {SIZE}",                
+    )     
+
+def create_m_shape_and_mask(m, size, outer_bean_radius, inner_bean_radius, start_angle, end_angle):
+    if abs(m) <= 1e-8:
+        return None, None
+
+    m_path_text_radius = (outer_bean_radius + inner_bean_radius) / 2
+    center = size / 2
+
+    m_text_path = Path(id="m-text-path", fill="none")
+    m_text_path.M(size/2 + m_path_text_radius * math.cos(start_angle), 
+                size/2 + m_path_text_radius * math.sin(start_angle))
+    m_text_path.A(m_path_text_radius, m_path_text_radius, 0, 0, 1, 
+                size/2 + m_path_text_radius * math.cos(end_angle), 
+                size/2 + m_path_text_radius * math.sin(end_angle))
+
+    bean_shape = create_bean_shape(center, center, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
+
+    return create_shape_with_cutout_text(
+        bean_shape,
+        f"{m:.4f}",
+        size/30,
+        text_path_id="m-text-path"
+    ), m_text_path
 
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
     attributes = {
@@ -1429,23 +1960,23 @@ def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=Non
     attributes.update(kwargs)
     return ft_hx('feDropShadow', **attributes)
 
-def symlog_scale(x, linthresh=LINTHRESH):
+def symlog_scale(x, linthresh):
     return math.copysign(math.log1p(abs(x) / linthresh), x)
 
-def inv_symlog_scale(y, linthresh=LINTHRESH):
+def inv_symlog_scale(y, linthresh):
     return math.copysign(linthresh * (math.exp(abs(y)) - 1), y)
 
-def normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH):
+def normalize_gradient(gradient, scale_min, scale_max, linthresh):
     log_gradient = symlog_scale(gradient, linthresh)
     log_min = symlog_scale(scale_min, linthresh)
     log_max = symlog_scale(scale_max, linthresh)
     return (log_gradient - log_min) / (log_max - log_min) * 100
 
-def pos_to_angle(pos, log_scale_min, log_scale_max):
-    return math.pi + (symlog_scale(pos, LINTHRESH) - log_scale_min) / (log_scale_max - log_scale_min) * math.pi
+def pos_to_angle(pos, log_scale_min, log_scale_max, linthresh):
+    return math.pi + (symlog_scale(pos, linthresh) - log_scale_min) / (log_scale_max - log_scale_min) * math.pi
 
-def angle_to_coords(angle, radius):
-    return (CENTER + radius * math.cos(angle), CENTER + radius * math.sin(angle))
+def angle_to_coords(angle, radius, center):
+    return (center + radius * math.cos(angle), center + radius * math.sin(angle))
 
 def create_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angle, end_angle):
         path = Path(fill="#372572", opacity=0.8)                
@@ -1467,7 +1998,7 @@ def create_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angl
         path.Z()
         return path
 
-def create_upward_bean_shape(x, y, width, height):
+def create_convex_shape(x, y, width, height):
     path = Path(fill="#4a90e2", opacity=0.8)       
     ctrl_offset = height * 0.8     
     path.M(x, y + height)    
@@ -1477,7 +2008,6 @@ def create_upward_bean_shape(x, y, width, height):
     path.L(x, y + height)    
     path.Z()
     return path
-
 
 def create_shape_with_cutout_text(shape, text, font_size, text_path_id=None):
     shape_id = f"shape-{text.replace('.', '-')}"
@@ -1516,8 +2046,8 @@ def create_shape_with_cutout_text(shape, text, font_size, text_path_id=None):
 
     return shape, mask
 
-def create_arrow_path(center_x, center_y, gradient, max_gradient, m_angle):
-    arc_radius = INNER_RADIUS * 0.6
+def create_arrow_path(center_x, center_y, gradient, max_gradient, m_angle, inner_radius, size):
+    arc_radius = inner_radius * 0.6
     start = (
         center_x + arc_radius * math.cos(m_angle),
         center_y + arc_radius * math.sin(m_angle)
@@ -1539,8 +2069,8 @@ def create_arrow_path(center_x, center_y, gradient, max_gradient, m_angle):
     arrow_path = Path(stroke="blue", stroke_width=2, fill="blue")
     arrow_path.M(*start)
     arrow_path.A(arc_radius, arc_radius, 0, 0, int(gradient > 0), *end)
-    base_arrow_length = SIZE / 30
-    base_arrow_width = SIZE / 90        
+    base_arrow_length = size / 30
+    base_arrow_width = size / 90        
     scale_factor = 0.5 + 0.5 * min(abs(gradient) / max_gradient, 1)
     arrow_length = base_arrow_length * scale_factor
     arrow_width = base_arrow_width * scale_factor        
@@ -1561,256 +2091,6 @@ def create_arrow_path(center_x, center_y, gradient, max_gradient, m_angle):
     
     return arrow_path
 
-
-def create_parameter_dial(data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9, size=SIZE):        
-    percentage = normalize_gradient(gradient)
-    text_radius = (OUTER_RADIUS + INNER_RADIUS) / 2
-    log_scale_min, log_scale_max = symlog_scale(SCALE_MIN, LINTHRESH), symlog_scale(SCALE_MAX, LINTHRESH)
-    pos_to_angle_func = partial(pos_to_angle, log_scale_min=log_scale_min, log_scale_max=log_scale_max)
-            
-    START_ANGLE = math.radians(135)
-    END_ANGLE = math.radians(45)
-    start_x, start_y = angle_to_coords(START_ANGLE, OUTER_RADIUS)
-    end_x, end_y = angle_to_coords(END_ANGLE, OUTER_RADIUS)
-    
-    knob_angle = math.radians(180 + percentage * 1.8)        
-    knob_width, knob_length = RING_WIDTH, RING_WIDTH * 1.1
-    knob_x, knob_y = angle_to_coords(knob_angle, OUTER_RADIUS)
-    knob_end_x, knob_end_y = angle_to_coords(knob_angle, OUTER_RADIUS - knob_length)
-     
-
-    sqrt_v = math.sqrt(v)
-    outer_m_radius = INNER_RADIUS * 0.65 
-    inner_v_radius = outer_m_radius * 0.6 
-    m_text_radius = (outer_m_radius + inner_v_radius) * .5
-        
-    m_circle = Circle(cx=CENTER, cy=CENTER, r=outer_m_radius, fill="none", stroke="#888", stroke_width=1, mask=f"url(#top-half-mask)")    
-    v_circle = Circle(cx=CENTER, cy=CENTER, r=inner_v_radius, fill="none", stroke="#888", stroke_width=1, mask=f"url(#top-half-mask)")
-    
-    m_ticks = []
-    m_labels = []
-    m_values = [-1.00, -0.20, -0.02, 0.00, 0.02, 0.20, 1.00]
-    label_distance = 1
-
-    for i, value in enumerate(m_values):
-        angle = math.pi + (i / (len(m_values) - 1)) * math.pi
-        tick_start = angle_to_coords(angle, outer_m_radius)
-        tick_end = angle_to_coords(angle, outer_m_radius + 5)
-        m_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], stroke="#888", stroke_width=1))                
-        text_width = len(f"{value:.2f}") * size / 35 
-                
-        if angle > math.pi:  # Left side
-            label_radius = outer_m_radius + label_distance + text_width / 2
-        else:  # Right side
-            label_radius = outer_m_radius + label_distance + text_width / 2
-        
-        label_pos = angle_to_coords(angle, label_radius)
-                
-        rotation = (angle - math.pi) * 180 / math.pi
-        if rotation > 90 or rotation < -90:
-            rotation += 180
-        
-        m_labels.append(
-            Text(
-                f"{value:.2f}",
-                x=label_pos[0], y=label_pos[1],
-                font_size=size/35,
-                fill="#888",
-                text_anchor="middle",
-                dominant_baseline="central",
-                transform=f"rotate({rotation} {label_pos[0]} {label_pos[1]})"
-            )
-        )
-    m_angle = pos_to_angle_func(m)    
-    v_ticks = []    
-    num_ticks = 20
-
-    for i in range(-num_ticks, num_ticks + 1):        
-        angle = m_angle + (i / num_ticks) * (math.pi / 2)    
-        angle = angle % (2 * math.pi)
-        if angle < math.pi:
-            angle += math.pi
-
-        tick_start = angle_to_coords(angle, inner_v_radius)
-        tick_end = angle_to_coords(angle, inner_v_radius - 5)
-               
-        v_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], 
-                            stroke="#888", stroke_width=1))
-
-
-    buffer_angle = math.radians(12)
-    text_arc_length = math.radians(40)
-
-    if m >= 0:
-        end_angle = m_angle - buffer_angle
-        start_angle = end_angle - text_arc_length
-    else:
-        start_angle = m_angle + buffer_angle
-        end_angle = start_angle + text_arc_length
-
-
-    outer_bean_radius = m_text_radius * 1.15
-    inner_bean_radius = m_text_radius * 0.85
-
-    m_path_text_radius = (outer_bean_radius + inner_bean_radius) / 2
-    
-    m_text_path = Path(id="m-text-path", fill="none")
-    m_text_path.M(size/2 + m_path_text_radius * math.cos(start_angle), 
-                size/2 + m_path_text_radius * math.sin(start_angle))
-    m_text_path.A(m_path_text_radius, m_path_text_radius, 0, 0, 1, 
-                size/2 + m_path_text_radius * math.cos(end_angle), 
-                size/2 + m_path_text_radius * math.sin(end_angle))
-
-    bean_shape = create_bean_shape(size/2, size/2, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
-
-    m_shape, m_mask = create_shape_with_cutout_text(
-        bean_shape,
-        f"{m:.4f}",
-        size/30,
-        text_path_id="m-text-path"
-    )
-    
-
-    m_indicator = Line(
-        x1=CENTER,
-        y1=CENTER,
-        x2=angle_to_coords(m_angle, outer_m_radius * 1.15)[0],
-        y2=angle_to_coords(m_angle, outer_m_radius * 1.15)[1],
-        stroke="#372572", stroke_width=2
-    )
-    center_circle = Circle(
-    cx=size/2,
-    cy=size/2,
-    r=3,
-    fill="#372572"
-)
-        
-    arrow_length = abs(gradient) * (1 - beta1) * (OUTER_RADIUS - INNER_RADIUS)        
-    max_arrow_length = (OUTER_RADIUS - INNER_RADIUS) * 0.5
-    arrow_length = min(arrow_length, max_arrow_length)
-            
-    max_gradient = 5.0
-    blue_arrow = create_arrow_path(CENTER, CENTER, gradient, max_gradient, m_angle)
-
-    sqrt_v_width = size * 0.15
-    sqrt_v_height = size * 0.05
-    sqrt_v_x = size/2 - sqrt_v_width/2
-    sqrt_v_y = size/2 + size/70
-    
-    sqrt_v_shape = create_upward_bean_shape(sqrt_v_x, sqrt_v_y, sqrt_v_width, sqrt_v_height)
-        
-    sqrt_v_text_path = Path(id="sqrt-v-text-path", fill="none")
-    sqrt_v_text_path.M(sqrt_v_x, sqrt_v_y + sqrt_v_height/2)
-    sqrt_v_text_path.Q(sqrt_v_x + sqrt_v_width/2, sqrt_v_y + sqrt_v_height + sqrt_v_height/2, 
-                    sqrt_v_x + sqrt_v_width, sqrt_v_y + sqrt_v_height/2)
-    
-    sqrt_v_shape, sqrt_v_mask = create_shape_with_cutout_text(
-        sqrt_v_shape,
-        f"{sqrt_v:.4f}",
-        size/30, 
-        text_path_id="sqrt-v-text-path"
-    )
- 
-    gradient_defs = {
-        'low': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
-        'mid': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
-        'high': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
-    }
-
-    gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'    
-
-    gradient_def = LinearGradient(
-        *[Stop(offset=f"{i/(len(gradient_defs[gradient_key])-1)*100}%", 
-               style=f"stop-color:{color};stop-opacity:1")
-          for i, color in enumerate(gradient_defs[gradient_key])],
-        id="dialGradient", x1="0%", y1="0%", x2="100%", y2="100%",
-    )
-
-    mask_path = Path(fill="black").M(size/2, size/2).L(start_x, start_y).A(OUTER_RADIUS, OUTER_RADIUS, 0, 1, 0, end_x, end_y).Z()
-
-    knob_path = Path(fill="white").M(knob_x, knob_y)
-    knob_path.L(knob_end_x + knob_width/2 * math.sin(knob_angle), knob_end_y - knob_width/2 * math.cos(knob_angle))
-    knob_path.L(knob_end_x - knob_width/2 * math.sin(knob_angle), knob_end_y + knob_width/2 * math.cos(knob_angle))
-    knob_path.Z()
-
-    # Calculate z = m/sqrt(v)
-    z = m / math.sqrt(v)
-    z_color = "#4CAF50" if z > 0 else "#F44336"
-    z_triangle = "▲" if z > 0 else "▼"    
-    rect_width, rect_height = size * 0.4, size * 0.07
-    rect_x = size / 2 - rect_width / 2
-    rect_y = size / 2 + INNER_RADIUS / 1.8
-
-    rect_attrs = dict(
-        x=rect_x, y=rect_y,
-        width=rect_width, height=rect_height,
-        rx=rect_height / 2
-    )
-
-    z_background = Rect(fill=z_color, **rect_attrs, opacity=0.8)
-    z_text = Text(
-        f"{z_triangle} {abs(z):.4f}",
-        x=size / 2, y=rect_y + rect_height / 2,
-        font_family="Arial, sans-serif", font_size=size / 16, font_weight="bold",
-        text_anchor="middle", dominant_baseline="central", fill="white"
-    )        
-    z_cutout = Rect(fill="white", mask="url(#z-text-mask)", **rect_attrs)
-
-    data_text = Text(
-        f"{data:.4f}", x=size/2, y=size/2 + INNER_RADIUS/2.5,
-        font_family="Arial, sans-serif", font_size=size/8, font_weight="bold",
-        text_anchor="middle", dominant_baseline="central", fill="black"
-    )
-
-    text_path = Path(id="textPath", stroke="purple", stroke_width=2, fill="none")
-    text_path.M(*angle_to_coords(math.radians(135), text_radius))
-    text_path.A(text_radius, text_radius, 0, 0, 0, *angle_to_coords(math.radians(45), text_radius))
-
-    circle = partial(Circle, cx=CENTER, cy=CENTER)
-
-    return Svg(
-        Defs(
-            gradient_def,
-            Mask(Rect(x=0, y=0, width=size, height=size, fill="white"), mask_path, id="dialMask"),
-            Mask(Rect(x=0, y=0, width=size, height=size, fill="white"),
-                 Rect(x=0, y=CENTER, width=size, height=CENTER, fill="black"),
-                 id="top-half-mask"
-                 ),
-            Filter(FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"), id="dropShadow",),
-            text_path, m_text_path, sqrt_v_text_path,
-            Mask(                
-                Rect(fill="black", **rect_attrs),
-                Text(
-                    f"{z_triangle} {abs(z):.4f}",
-                    x=size/2, y=rect_y + rect_height/2,
-                    font_family="Arial, sans-serif", font_size=size/18, font_weight="bold",
-                    text_anchor="middle", dominant_baseline="central", fill="white"
-                ),
-                id="z-text-mask",
-            ),            
-            sqrt_v_mask,
-            m_mask,          
-        ),
-        circle(r=OUTER_RADIUS, fill="url(#dialGradient)", mask="url(#dialMask)"),
-        G(
-            circle(r=INNER_RADIUS, fill="white", stroke="none"),
-            m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,
-            m_shape, blue_arrow,
-            sqrt_v_shape, data_text, z_background, z_cutout,                                                      
-            m_indicator, center_circle,
-            filter="url(#dropShadow)"
-        ),        
-       
-        Text(
-            TextPath(
-                Tspan(f"{gradient:.4f}", dy="0.4em"),                
-                href="#textPath", startOffset="50%",
-            ),
-            font_family="Arial, sans-serif", font_size=size/10, text_anchor="middle", fill="black"
-        ),
-        width=size, height=size,
-        id="parameter-dial"
-    )
 
 @rt('/parameter_dial')
 def get():
@@ -1855,142 +2135,6 @@ async def update_dial(request: Request):
     random_data = random.uniform(-1, 1)
     return create_parameter_dial(data=random_data, gradient=gradient, m=m, v=v)
 
-# ------------------------------------------------------------------------------------------
-# ----------------------------------------Gaussian------------------------------------------
-# ------------------------------------------------------------------------------------------
-
-@rt('/hovering_gaussian')
-def get():    
-    mean, std_dev = generate_gaussian_params()
-    size = 400
-    return Div(
-        H1("Hovering Gaussian", cls="text-center mb-4"),
-        P(f"Mean: {mean:.4f}, StdDev: {std_dev:.4f}", id="gaussian-params", cls="text-center mb-4"),        
-        create_hovering_gaussian_svg(mean, std_dev, size),
-        id="gaussian-container",
-        cls="container mx-auto px-4"
-    )
-
-def generate_gaussian_params():
-    mean = random.uniform(-0.5, 0.5)
-    std_dev = math.sqrt(random.uniform(0.1, 0.5))
-    return mean, std_dev
-
-
-def create_hovering_gaussian_svg(mean, std_dev, size=400):
-    gaussian_size = size * 0.375  # 150 / 400
-    center = size // 2
-    radial_segments, circular_segments = 40, 60
-
-    # Create radial grid points
-    points = [
-        [(i / (radial_segments - 1))**2 * math.cos(angle), 
-         (i / (radial_segments - 1))**2 * math.sin(angle)]
-        for i in range(radial_segments)
-        for angle in (2 * math.pi * j / circular_segments for j in range(circular_segments))
-    ]
-
-    # Create lines for the grid
-    lines = [
-        Line(0, 0, 0, 0, stroke="black", stroke_width=1, id=f"line_{i}")
-        for i in range(radial_segments * circular_segments)
-    ]
-
-    # Create SVG content
-    svg_content = Svg(
-        G(*lines, id="gaussian"),
-        width="100%", height="100%",
-        viewBox=f"0 0 {size} {size}",
-        preserveAspectRatio="xMidYMid meet",
-        style="background-color: #f0f0f0; max-width: 100%; height: auto;"
-    )
-    
-    gaussian_new_script = f"""
-        const gaussianSize = {gaussian_size};
-        const center = {center};
-        const radialSegments = {radial_segments};
-        const circularSegments = {circular_segments};
-        window.mean = {mean};
-        window.stdDev = {std_dev};
-
-        const points = {json.dumps(points)};
-        let is3D = false;
-        let transitionProgress = 0;
-
-        function gaussian(x, y, stdDev) {{
-            const r = Math.sqrt(x*x + y*y);
-            return Math.exp(-(r*r) / (2 * stdDev*stdDev));
-        }}
-
-        function rotatePoint(point, angleX, angleY) {{
-            let [x, y, z] = point;
-            const cosX = Math.cos(angleX), sinX = Math.sin(angleX);
-            const cosY = Math.cos(angleY), sinY = Math.sin(angleY);
-            
-            const y1 = y * cosX - z * sinX;
-            const z1 = y * sinX + z * cosX;
-            
-            return [
-                x * cosY + z1 * sinY,
-                y1,
-                -x * sinY + z1 * cosY
-            ];
-        }}
-
-        function updateGaussian() {{
-            const time = performance.now() / 1000;
-            const angleX = Math.sin(time * 0.3) * Math.PI / 12;
-            const angleY = Math.sin(time * 0.4) * Math.PI / 8;
-            const hoverOffset = Math.sin(time * 1.5) * 5;
-
-            const rotatedPoints = points.map(p => {{
-                const z = gaussian(p[0], p[1], window.stdDev) * transitionProgress;
-                return rotatePoint([p[0], p[1], z], angleX * transitionProgress, angleY * transitionProgress);
-            }});
-
-            // Update grid lines
-            for (let i = 0; i < radialSegments; i++) {{
-                for (let j = 0; j < circularSegments; j++) {{
-                    const lineIndex = i * circularSegments + j;
-                    const line = document.getElementById(`line_${{lineIndex}}`);
-                    if (line) {{
-                        const start = rotatedPoints[lineIndex];
-                        const endIndex = (j === circularSegments - 1) ? i * circularSegments : lineIndex + 1;
-                        const end = rotatedPoints[endIndex];
-
-                        line.setAttribute('x1', start[0] * gaussianSize + center);
-                        line.setAttribute('y1', -start[2] * gaussianSize + center + hoverOffset * transitionProgress);
-                        line.setAttribute('x2', end[0] * gaussianSize + center);
-                        line.setAttribute('y2', -end[2] * gaussianSize + center + hoverOffset * transitionProgress);
-                    }}
-                }}
-            }}
-
-            if (is3D && transitionProgress < 1) {{
-                transitionProgress += 0.02;
-                if (transitionProgress > 1) transitionProgress = 1;
-            }} else if (!is3D && transitionProgress > 0) {{
-                transitionProgress -= 0.02;
-                if (transitionProgress < 0) transitionProgress = 0;
-            }}
-
-            requestAnimationFrame(updateGaussian);
-        }}
-
-        function toggleView() {{
-            is3D = !is3D;
-        }}
-
-        updateGaussian();
-
-        document.getElementById('gaussian-container').addEventListener('click', toggleView);
-    """
-
-    return Div(
-        svg_content,
-        Script(gaussian_new_script),
-        cls="w-full max-w-md mx-auto aspect-square"
-    )
 
 # Run the app
 serve()
