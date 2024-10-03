@@ -397,6 +397,16 @@ class Visualizer:
         self.model = MLP(2, [8, 3])
         self.optimizer = AdamW(self.model.parameters(), lr=1e-1, weight_decay=1e-4)
 
+    def get_optimizer_state(self):
+        return {
+            'lr': self.optimizer.lr,
+            'beta1': self.optimizer.beta1,
+            'beta2': self.optimizer.beta2,
+            'eps': self.optimizer.eps,
+            'weight_decay': self.optimizer.weight_decay,            
+            't': self.optimizer.t
+        }
+    
     def reset(self):
         if self.model is None:
             self.initialize_model()
@@ -441,6 +451,9 @@ class Visualizer:
             loss = self.loss_fun(X_train, y_train)
             loss.backward()
             self.optimizer.step()
+            current_step = self.get_current_step()
+            self.history.append(current_step)
+
             self.optimizer.zero_grad()
 
             self.step_count += 1
@@ -451,10 +464,7 @@ class Visualizer:
                 X_val, y_val = zip(*self.val_split)
                 val_loss = self.loss_fun(X_val, y_val)
                 self.val_losses.append(val_loss.data)
-                    
-        current_step = self.get_current_step()
-        print("current_step: ", current_step, "param_state: ", current_step['param_state'])
-        self.history.append(current_step)
+                                            
         return current_step
 
     def get_current_step(self):
@@ -921,6 +931,51 @@ document.body.addEventListener('svgUpdated', function() {
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+def create_hyperparameter_controls(optimizer_state):
+    return Div(
+        Div(
+            Label("lr:", For="lr-select", cls="mr-2"),
+            Select(
+                Option(f"{optimizer_state['lr']:.4f}", value=optimizer_state['lr'], selected=True),
+                id="lr-select", disabled=True, cls="bg-gray-100 border border-gray-300 rounded-md p-1"
+            ),
+            cls="mb-2"
+        ),
+        Div(
+            Label("Beta 1:", For="beta1-select", cls="mr-2"),
+            Select(
+                Option(f"{optimizer_state['beta1']:.4f}", value=optimizer_state['beta1'], selected=True),
+                id="beta1-select", disabled=True, cls="bg-gray-100 border border-gray-300 rounded-md p-1"
+            ),
+            cls="mb-2"
+        ),
+        Div(
+            Label("Beta 2:", For="beta2-select", cls="mr-2"),
+            Select(
+                Option(f"{optimizer_state['beta2']:.4f}", value=optimizer_state['beta2'], selected=True),
+                id="beta2-select", disabled=True, cls="bg-gray-100 border border-gray-300 rounded-md p-1"
+            ),
+            cls="mb-2"
+        ),
+        Div(
+            Label("eps:", For="eps-select", cls="mr-2"),
+            Select(
+                Option(f"{optimizer_state['eps']:.4e}", value=optimizer_state['eps'], selected=True),
+                id="eps-select", disabled=True, cls="bg-gray-100 border border-gray-300 rounded-md p-1"
+            ),
+            cls="mb-2"
+        ),
+        Div(
+            Label("Weight Decay:", For="weight-decay-select", cls="mr-2"),
+            Select(
+                Option(f"{optimizer_state['weight_decay']:.4e}", value=optimizer_state['weight_decay'], selected=True),
+                id="weight-decay-select", disabled=True, cls="bg-gray-100 border border-gray-300 rounded-md p-1"
+            ),
+            cls="mb-2"
+        ),
+        cls="flex flex-wrap gap-4 mb-4"
+    )
+
 def create_main_parameter_dials(visualizer, container_width=800, container_height=400):
     if not visualizer.model:
         return Div("No model available", id="parameter-dials")
@@ -938,12 +993,24 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
     start_x = (container_width - grid_width) / 2
     start_y = (container_height - grid_height) / 2    
     
+    optimizer_state = visualizer.get_optimizer_state()
+    current_step = visualizer.get_current_step()
+
     dials = []
+    param_index = 0
     for i, layer in enumerate(visualizer.model.layers):
         for j, neuron in enumerate(layer.neurons):
             for k, w in enumerate(neuron.w):
-                dials.append(resize_dial(f"layer{i}_neuron{j}_weight{k}", w, dial_size))
-            dials.append(resize_dial(f"layer{i}_neuron{j}_bias", neuron.b, dial_size))
+                param_state = current_step['param_state'][f'param_{param_index}']
+                dials.append(resize_dial(f"layer{i}_neuron{j}_weight{k}", w, dial_size, 
+                                         param_state['grad'], param_state['m'], param_state['v'],
+                                         optimizer_state))
+                param_index += 1
+            param_state = current_step['param_state'][f'param_{param_index}']
+            dials.append(resize_dial(f"layer{i}_neuron{j}_bias", neuron.b, dial_size,
+                                     param_state['grad'], param_state['m'], param_state['v'],
+                                     optimizer_state))
+            param_index += 1
     
     positioned_dials = [
         G(dial, transform=f"translate({start_x + (i % columns) * (dial_size + dial_gap)}, {start_y + (i // columns) * (dial_size + dial_gap)})")
@@ -955,7 +1022,7 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
     
     return Svg(
         Rect(x=0, y=0, width=svg_width, height=svg_height, fill="#f0f0f0"),
-        *positioned_dials,
+        *positioned_dials,        
         width="100%", height="100%", 
         viewBox=f"0 0 {svg_width} {svg_height}",
         preserveAspectRatio="xMidYMid meet",
@@ -963,14 +1030,14 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
         style="min-height: 400px;"
     )
 
-def resize_dial(param_name, param, size):
+def resize_dial(param_name, param, size, gradient, m, v, optimizer_state):
     dial = create_parameter_dial(
         param_name=param_name,
         data=float(param.data),
-        gradient=float(param.grad) if param.grad is not None else 0,
-        m=float(getattr(param, 'm', 0)),
-        v=float(getattr(param, 'v', 0)),
-        beta1=0.9
+        gradient=float(gradient),
+        m=float(m),
+        v=float(v),
+        optimizer_state=optimizer_state
     )
     if dial is not None:
         dial.attrs['width'] = size
@@ -1029,6 +1096,7 @@ def get():
                 # Graph Visualization Section
                 Div(
                     H3("Optimizer State", cls="text-xl font-semibold mb-2"),
+                    create_hyperparameter_controls(visualizer.get_optimizer_state()),
                      Div(
                         create_main_parameter_dials(visualizer),
                         id="parameter-dials",
@@ -1293,11 +1361,6 @@ async def get():
 
 
 
-
-
-
-
-
     #         Div(
     #             H2("Inputs and Initialization", cls="text-2xl font-semibold mb-4 text-blue-500"),
     #             P("AdamW is initialized with the following parameters:", cls="mb-4"),
@@ -1356,7 +1419,13 @@ async def get():
 # ----------------------------------------Dial--------------------------------------------
 # ------------------------------------------------------------------------------------------
 
-def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.0, beta1=0.9):        
+def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.0, optimizer_state=None):
+    print(f"Dial for {param_name}:")
+    print(f"  data: {data}")
+    print(f"  gradient: {gradient}")
+    print(f"  m: {m}")
+    print(f"  v: {v}")
+
     SIZE = 200
     RING_WIDTH = SIZE / 8
     OUTER_RADIUS = SIZE / 2 - 5
@@ -1364,8 +1433,32 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     CENTER = SIZE / 2
     SCALE_MIN, SCALE_MAX = -1.0, 1.0
     LINTHRESH = 0.01
-    eps = 1e-8
-    z = m / (math.sqrt(v) + eps) if v != 0 else 0
+    
+
+     # Calculate the AdamW update
+    t = optimizer_state['t']
+    print(f"  t: {t}")
+    print(f"  lr: {optimizer_state['lr']}")
+    print(f"  beta1: {optimizer_state['beta1']}")
+    print(f"  beta2: {optimizer_state['beta2']}")
+    print(f"  eps: {optimizer_state['eps']}")
+    print(f"  weight_decay: {optimizer_state['weight_decay']}")
+    
+    if t > 0:
+        m_hat = m / (1 - optimizer_state['beta1'] ** t)
+        v_hat = v / (1 - optimizer_state['beta2'] ** t)
+        update = optimizer_state['lr'] * (m_hat / (math.sqrt(v_hat) + optimizer_state['eps']) + optimizer_state['weight_decay'] * data)        
+        z= -update
+        print(f"  m_hat: {m_hat}")
+        print(f"  v_hat: {v_hat}")
+        print(f"  sqrt(v_hat): {math.sqrt(v_hat)}")
+        print(f"  m_hat / (sqrt(v_hat) + eps): {m_hat / (math.sqrt(v_hat) + optimizer_state['eps'])}")
+        print(f"  weight_decay * data: {optimizer_state['weight_decay'] * data}")
+        print(f"  update: {update}")
+        print(f"  z: {z}")
+    else:
+        z=0
+        print(f"  z: {z} (t = 0)")
     
     percentage = normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH)
     text_radius = (OUTER_RADIUS + INNER_RADIUS) / 2
@@ -1441,40 +1534,32 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
         v_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], 
                             stroke="#888", stroke_width=1))
 
-    show_m_bean = abs(m) > 1e-15
+    
 
-    if show_m_bean:
-        buffer_angle = math.radians(12)
-        text_arc_length = math.radians(40)
-        if m >= 0:
-            end_angle = m_angle - buffer_angle
-            start_angle = end_angle - text_arc_length
-        else:
-            start_angle = m_angle + buffer_angle
-            end_angle = start_angle + text_arc_length
-
-        outer_bean_radius = m_text_radius * 1.15
-        inner_bean_radius = m_text_radius * 0.85    
-
-        m_path_text_radius = (outer_bean_radius + inner_bean_radius) / 2
-        
-        m_text_path = Path(id=f"{param_name}-m-text-path", fill="none")
-        m_text_path.M(SIZE/2 + m_path_text_radius * math.cos(start_angle), 
-                    SIZE/2 + m_path_text_radius * math.sin(start_angle))
-        m_text_path.A(m_path_text_radius, m_path_text_radius, 0, 0, 1, 
-                    SIZE/2 + m_path_text_radius * math.cos(end_angle), 
-                    SIZE/2 + m_path_text_radius * math.sin(end_angle))
-
-        bean_shape = create_bean_shape(SIZE/2, SIZE/2, outer_bean_radius, inner_bean_radius, start_angle, end_angle)
-
-        m_shape, m_mask = create_shape_with_cutout_text(
-            bean_shape,
-            f"{m:.4f}",
-            SIZE/30,
-            text_path_id=f"{param_name}-m-text-path"
-        )
+    buffer_angle = math.radians(12)
+    text_arc_length = math.radians(40)
+    if m >= 0:
+        end_angle = m_angle - buffer_angle
+        start_angle = end_angle - text_arc_length
     else:
-        m_shape = m_mask = m_text_path = None
+        start_angle = m_angle + buffer_angle
+        end_angle = start_angle + text_arc_length
+
+    outer_bean_radius = m_text_radius * 1.15
+    inner_bean_radius = m_text_radius * 0.85    
+
+    m_bean_group, m_bean_mask = create_m_bean_with_text(
+        param_name,
+        m,
+        SIZE,
+        start_angle,
+        end_angle,
+        outer_bean_radius,
+        inner_bean_radius
+    )
+
+    if m == 0:
+        m_bean_group = m_bean_mask = None
 
     m_indicator = Line(
         x1=CENTER,
@@ -1490,7 +1575,7 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     fill="#372572"
 )
         
-    arrow_length = abs(gradient) * (1 - beta1) * (OUTER_RADIUS - INNER_RADIUS)        
+    arrow_length = abs(gradient) * (1 - optimizer_state['beta1']) * (OUTER_RADIUS - INNER_RADIUS)        
     max_arrow_length = (OUTER_RADIUS - INNER_RADIUS) * 0.5
     arrow_length = min(arrow_length, max_arrow_length)
             
@@ -1502,34 +1587,23 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     sqrt_v_x = SIZE/2 - sqrt_v_width/2
     sqrt_v_y = SIZE/2 + SIZE/70
     
-    sqrt_v_shape = create_convex_shape(sqrt_v_x, sqrt_v_y, sqrt_v_width, sqrt_v_height)
-        
+    sqrt_v_shape = create_convex_shape(sqrt_v_x, sqrt_v_y, sqrt_v_width, sqrt_v_height)    
     sqrt_v_text_path = Path(id="sqrt-v-text-path", fill="none")
     sqrt_v_text_path.M(sqrt_v_x, sqrt_v_y + sqrt_v_height/2)
     sqrt_v_text_path.Q(sqrt_v_x + sqrt_v_width/2, sqrt_v_y + sqrt_v_height + sqrt_v_height/2, 
                     sqrt_v_x + sqrt_v_width, sqrt_v_y + sqrt_v_height/2)
     
-    sqrt_v_shape, sqrt_v_mask = create_shape_with_cutout_text(
+    sqrt_v_shape, sqrt_v_mask = create_sqrtv_shape_with_cutout_text(
         sqrt_v_shape,
         f"{sqrt_v:.4f}",
         SIZE/30, 
+        param_name,
         text_path_id="sqrt-v-text-path"
     )
  
-    gradient_defs = {
-        'low': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
-        'mid': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
-        'high': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
-    }
+    gradient_key = 'negative' if gradient < 0 else 'positive' if gradient > 0 else 'zeroed'
+    gradient_id = f"dial-gradient-{gradient_key}"
 
-    gradient_key = 'low' if percentage < 50 else 'high' if percentage > 50 else 'mid'    
-
-    gradient_def = LinearGradient(
-        *[Stop(offset=f"{i/(len(gradient_defs[gradient_key])-1)*100}%", 
-               style=f"stop-color:{color};stop-opacity:1")
-          for i, color in enumerate(gradient_defs[gradient_key])],
-        id="dialGradient", x1="0%", y1="0%", x2="100%", y2="100%",
-    )
 
     mask_path = Path(fill="black").M(SIZE/2, SIZE/2).L(start_x, start_y).A(OUTER_RADIUS, OUTER_RADIUS, 0, 1, 0, end_x, end_y).Z()
 
@@ -1544,21 +1618,20 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     rect_x = SIZE / 2 - rect_width / 2
     rect_y = SIZE / 2 + INNER_RADIUS / 1.8
 
-    rect_attrs = dict(
+    z_background = Rect(
         x=rect_x, y=rect_y,
         width=rect_width, height=rect_height,
-        rx=rect_height / 2
+        rx=rect_height / 2,
+        fill=z_color, opacity=0.8
     )
 
-    z_background = Rect(fill=z_color, **rect_attrs, opacity=0.8)
     z_text = Text(
-        f"{z_triangle} {abs(z):.4f}",
-        x=SIZE / 2, y=rect_y + rect_height / 2,
-        font_family="Arial, sans-serif", font_size=SIZE / 16, font_weight="bold",
+        f"{z_triangle} {abs(z):.6f}",
+        x=SIZE/2, y=rect_y + rect_height/2,
+        font_family="Arial, sans-serif", font_size=SIZE/18, font_weight="bold",
         text_anchor="middle", dominant_baseline="central", fill="white"
-    )        
-    z_cutout = Rect(fill="white", mask="url(#z-text-mask)", **rect_attrs)
-
+    )
+   
     data_text = Text(
         f"{data:.4f}", x=SIZE/2, y=SIZE/2 + INNER_RADIUS/2.5,
         font_family="Arial, sans-serif", font_size=SIZE/8, font_weight="bold",
@@ -1572,35 +1645,28 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     circle = partial(Circle, cx=CENTER, cy=CENTER)
 
     return Svg(
+        setup_dial_gradients(),
         Defs(
-            gradient_def,
+                                 
             Mask(Rect(x=0, y=0, width=SIZE, height=SIZE, fill="white"), mask_path, id="dialMask"),
             Mask(Rect(x=0, y=0, width=SIZE, height=SIZE, fill="white"),
                  Rect(x=0, y=CENTER, width=SIZE, height=CENTER, fill="black"),
                  id="top-half-mask"
                  ),
             Filter(FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"), id="dropShadow",),
-            text_path, m_text_path, sqrt_v_text_path,
-            Mask(                
-                Rect(fill="black", **rect_attrs),
-                Text(
-                    f"{z_triangle} {abs(z):.4f}",
-                    x=SIZE/2, y=rect_y + rect_height/2,
-                    font_family="Arial, sans-serif", font_size=SIZE/18, font_weight="bold",
-                    text_anchor="middle", dominant_baseline="central", fill="white"
-                ),
-                id="z-text-mask",
-            ),            
-            sqrt_v_mask, m_mask,
-            m_text_path if show_m_bean else None,         
+            text_path, sqrt_v_text_path,
+            
+            sqrt_v_mask, m_bean_mask,
+                     
         ),
-        circle(r=OUTER_RADIUS, fill="url(#dialGradient)", mask="url(#dialMask)"),
+        circle(r=OUTER_RADIUS, fill=f"url(#{gradient_id})", mask="url(#dialMask)"),
         G(
             circle(r=INNER_RADIUS, fill="white", stroke="none"),
-            m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,
-            m_shape if show_m_bean else None, blue_arrow,
-            sqrt_v_shape, data_text, z_background, z_cutout,                                                      
+            m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,            
+            blue_arrow,
+            sqrt_v_shape, data_text, z_background, z_text,                                                      
             m_indicator, center_circle,
+            m_bean_group,
             filter="url(#dropShadow)"
         ),        
        
@@ -1615,6 +1681,23 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
         width=SIZE, height=SIZE,
         viewBox=f"0 0 {SIZE} {SIZE}",                
     )     
+
+def setup_dial_gradients():
+    gradient_defs = {
+        'negative': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
+        'zeroed': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
+        'positive': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
+    }
+
+    return Defs(*[
+        LinearGradient(
+            *[Stop(offset=f"{i/(len(colors)-1)*100}%", 
+                   style=f"stop-color:{color};stop-opacity:1")
+              for i, color in enumerate(colors)],
+            id=f"dial-gradient-{key}", x1="0%", y1="0%", x2="100%", y2="100%",
+        ) for key, colors in gradient_defs.items()
+    ])
+
 
 
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
@@ -1679,9 +1762,8 @@ def create_convex_shape(x, y, width, height):
     path.Z()
     return path
 
-def create_shape_with_cutout_text(shape, text, font_size, text_path_id=None):
-    shape_id = f"shape-{text.replace('.', '-')}"
-    mask_id = f"mask-{text.replace('.', '-')}"
+def create_sqrtv_shape_with_cutout_text(shape, text, font_size, param_name, text_path_id=None):
+    mask_id = f"sqrtv-mask-{param_name}"
     
     if text_path_id:
         text_element = Text(
@@ -1700,10 +1782,14 @@ def create_shape_with_cutout_text(shape, text, font_size, text_path_id=None):
     else:
         text_element = Text(
             text,
-            x=shape.x + shape.width/2 if hasattr(shape, 'width') else shape.cx,
-            y=shape.y + shape.height/2 if hasattr(shape, 'height') else shape.cy,
-            font_family="Arial, sans-serif", font_size=font_size, font_weight="bold",
-            text_anchor="middle", dominant_baseline="central", fill="black"
+            x=shape.x + shape.width/2,
+            y=shape.y + shape.height/2,
+            font_family="Arial, sans-serif", 
+            font_size=font_size, 
+            font_weight="bold",
+            text_anchor="middle", 
+            dominant_baseline="central", 
+            fill="black"
         )
 
     mask = Mask(
@@ -1715,6 +1801,56 @@ def create_shape_with_cutout_text(shape, text, font_size, text_path_id=None):
     shape.mask = f"url(#{mask_id})"
 
     return shape, mask
+
+def create_m_bean_with_text(param_name, m, size, start_angle, end_angle, outer_radius, inner_radius):
+    center_x, center_y = size / 2, size / 2
+    m_path_text_radius = (outer_radius + inner_radius) / 2
+    
+    # Create the bean shape
+    bean_shape = create_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angle, end_angle)
+
+    # Create the text path
+    text_path = (Path(id=f"{param_name}-m-text-path", fill="none")
+                 .M(center_x + m_path_text_radius * math.cos(start_angle), 
+                    center_y + m_path_text_radius * math.sin(start_angle))
+                 .A(m_path_text_radius, m_path_text_radius, 0, 0, 1, 
+                    center_x + m_path_text_radius * math.cos(end_angle), 
+                    center_y + m_path_text_radius * math.sin(end_angle)))
+    
+    # Create the text element
+    text_element = Text(
+        TextPath(
+            f"{m:.4f}",
+            href=f"#{param_name}-m-text-path",
+            startOffset="50%"
+        ),
+        font_family="Arial, sans-serif",
+        font_size=size/30,
+        font_weight="bold",
+        fill="black",
+        text_anchor="middle",
+        dominant_baseline="central"
+    )
+    
+    # Create mask for the bean shape
+    mask_id = f"{param_name}-m-mask"
+    mask = Mask(
+        Rect(x=0, y=0, width="100%", height="100%", fill="white"),
+        text_element,
+        id=mask_id
+    )
+    
+    # Apply mask to bean shape
+    bean_shape.mask = f"url(#{mask_id})"
+    
+    # Group all elements together
+    m_group = G(
+        bean_shape,
+        text_path
+    )
+    
+    return m_group, mask
+
 
 def create_arrow_path(center_x, center_y, gradient, max_gradient, m_angle, inner_radius, size):
     arc_radius = inner_radius * 0.6
