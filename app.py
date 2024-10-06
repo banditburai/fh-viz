@@ -2,7 +2,7 @@ import math
 from fasthtml.common import *
 from fasthtml.svg import *
 from graphviz import Digraph
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 import json
 import asyncio
@@ -447,8 +447,7 @@ class Visualizer:
         
         if self.is_training:
             # Perform one training step
-            X_train, y_train = zip(*self.train_split)
-            loss = self.loss_fun(X_train, y_train)
+            loss = self.loss_fun(self.train_split) 
             loss.backward()
             self.optimizer.step()
             current_step = self.get_current_step()
@@ -461,8 +460,7 @@ class Visualizer:
 
             # Evaluate validation loss every 10 steps
             if self.step_count % 10 == 0 and self.val_split:
-                X_val, y_val = zip(*self.val_split)
-                val_loss = self.loss_fun(X_val, y_val)
+                val_loss = self.loss_fun(self.val_split) 
                 self.val_losses.append(val_loss.data)
                                             
         return current_step
@@ -485,13 +483,13 @@ class Visualizer:
             'param_state': param_state
         }
 
-    def loss_fun(self, X, y):
+    def loss_fun(self, split):
         total_loss = Value(0.0)
-        for x, y in zip(X, y):
+        for x, y in split:
             logits = self.model(x)
             loss = cross_entropy(logits, y)
             total_loss = total_loss + loss
-        mean_loss = total_loss * (1.0 / len(X))
+        mean_loss = total_loss * (1.0 / len(split))
         return mean_loss
     
     def update_param_state(self, param_state):
@@ -599,13 +597,6 @@ def progress_tracker(step_count, train_loss, val_loss):
         hx_trigger="progressUpdate"
     )
 
-@rt("/update-optimizer-state")
-async def update_optimizer_state(request: Request):
-    data = await request.json()
-    # Assuming you have a global or accessible visualizer object
-    visualizer.update_param_state(data)
-    return create_main_parameter_dials(visualizer)
-
 animation_script = """
 const config = {
     maxReconnectAttempts: 5,
@@ -652,37 +643,72 @@ const updateUI = {
             updateLossChart(data.step_count, parseFloat(data.train_loss), parseFloat(data.val_loss));
         }
         if (data.param_state !== undefined) {
-            updateOptimizerState(data.param_state);
+            updateParameterDials(data.param_state);
         }
         document.dispatchEvent(new CustomEvent('progressUpdated', { detail: data }));
     }
 };
 
+const updateParameterDials = (paramState) => {    
+    Object.entries(paramState).forEach(([key, { value, grad }]) => {
+        const dial = document.getElementById(key);        
+        if (!dial) {
+            console.warn(`Dial not found for ${key}`);
+            return;
+        }
+
+        const dataText = dial.querySelector('[data-id="data-value"]');
+        const gradientText = dial.querySelector('[data-id="gradient-value"]');        
+
+        if (!dataText || !gradientText) {
+            console.warn(`Some elements not found for ${key}`);
+            return;
+        }
+
+        // Update data value
+        dataText.textContent = value?.toFixed(4) ?? dataText.textContent;        
+
+        // Update gradient value
+        const tspan = gradientText.querySelector('tspan');
+        if (tspan) {
+            tspan.textContent = grad?.toFixed(4) ?? tspan.textContent;            
+        } else {
+            console.warn(`No tspan found in gradientText for ${key}`);
+        }
+    });
+};
 const updateSSEConnection = () => {
-    if (state.eventSource) state.eventSource.close();
+    if (state.eventSource) {
+        console.log('Closing existing SSE connection');
+        state.eventSource.close();
+    }
     
     if (state.reconnectAttempts >= config.maxReconnectAttempts) {
         console.error('Max reconnection attempts reached. Please refresh the page.');
         return;
     }
 
+    console.log('Opening new SSE connection');
     state.eventSource = new EventSource(`/train_stream?train=${state.isTraining}`);
     
     state.eventSource.addEventListener('open', () => {
-        console.log('SSE connection opened');
+        console.log('SSE connection opened successfully');
         state.reconnectAttempts = 0;
     });
 
-    state.eventSource.addEventListener('step', (e) => {
+    state.eventSource.addEventListener('step', (e) => {        
         updateUI.progressTracker(JSON.parse(e.data));
     });
 
-    state.eventSource.addEventListener('heartbeat', () => console.log('Heartbeat received'));
+    state.eventSource.addEventListener('heartbeat', () => {
+        console.log('Heartbeat received');
+    });
 
     state.eventSource.addEventListener('error', (e) => {
         console.error('SSE connection error:', e);
         state.eventSource.close();
         state.reconnectAttempts++;
+        console.log(`Attempting to reconnect (attempt ${state.reconnectAttempts})`);
         setTimeout(updateSSEConnection, config.reconnectDelay);
     });
 };
@@ -720,25 +746,7 @@ const handleReset = () => {
         });
 };
 
-const updateOptimizerState = (paramState) => {
-    fetch('/update-optimizer-state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(paramState)
-    })
-    .then(response => response.text())
-    .then(svg => {
-        const parameterDials = elements.parameterDials();
-        if (parameterDials) {
-            parameterDials.innerHTML = svg;
-            // Dispatch custom event after updating SVG
-            document.body.dispatchEvent(new CustomEvent('svgUpdated'));
-        } else {
-            console.error("Element with id 'parameter-dials' not found");
-        }
-    })
-    .catch(error => console.error('Error updating optimizer state:', error));
-};
+
 
 let lossChart;
 
@@ -975,77 +983,6 @@ def create_hyperparameter_controls(optimizer_state):
         ),
         cls="flex flex-wrap gap-4 mb-4"
     )
-
-def create_main_parameter_dials(visualizer, container_width=800, container_height=400):
-    if not visualizer.model:
-        return Div("No model available", id="parameter-dials")
-
-    dial_size = 60
-    dial_gap = 10
-    
-    total_params = sum(len(neuron.w) + 1 for layer in visualizer.model.layers for neuron in layer.neurons)
-    columns = max(1, (container_width + dial_gap) // (dial_size + dial_gap))
-    rows = math.ceil(total_params / columns)
-    
-    grid_width = columns * (dial_size + dial_gap) - dial_gap
-    grid_height = rows * (dial_size + dial_gap) - dial_gap
-    
-    start_x = (container_width - grid_width) / 2
-    start_y = (container_height - grid_height) / 2    
-    
-    optimizer_state = visualizer.get_optimizer_state()
-    current_step = visualizer.get_current_step()
-
-    dials = []
-    param_index = 0
-    for i, layer in enumerate(visualizer.model.layers):
-        for j, neuron in enumerate(layer.neurons):
-            for k, w in enumerate(neuron.w):
-                param_state = current_step['param_state'][f'param_{param_index}']
-                dials.append(resize_dial(f"layer{i}_neuron{j}_weight{k}", w, dial_size, 
-                                         param_state['grad'], param_state['m'], param_state['v'],
-                                         optimizer_state))
-                param_index += 1
-            param_state = current_step['param_state'][f'param_{param_index}']
-            dials.append(resize_dial(f"layer{i}_neuron{j}_bias", neuron.b, dial_size,
-                                     param_state['grad'], param_state['m'], param_state['v'],
-                                     optimizer_state))
-            param_index += 1
-    
-    positioned_dials = [
-        G(dial, transform=f"translate({start_x + (i % columns) * (dial_size + dial_gap)}, {start_y + (i // columns) * (dial_size + dial_gap)})")
-        for i, dial in enumerate(dials[:columns * rows])
-    ]
-
-    svg_width = max(container_width, grid_width + 2 * start_x)
-    svg_height = max(container_height, grid_height + 2 * start_y)
-    
-    return Svg(
-        Rect(x=0, y=0, width=svg_width, height=svg_height, fill="#f0f0f0"),
-        *positioned_dials,        
-        width="100%", height="100%", 
-        viewBox=f"0 0 {svg_width} {svg_height}",
-        preserveAspectRatio="xMidYMid meet",
-        id="parameter-dials-svg",
-        style="min-height: 400px;"
-    )
-
-def resize_dial(param_name, param, size, gradient, m, v, optimizer_state):
-    dial = create_parameter_dial(
-        param_name=param_name,
-        data=float(param.data),
-        gradient=float(gradient),
-        m=float(m),
-        v=float(v),
-        optimizer_state=optimizer_state
-    )
-    if dial is not None:
-        dial.attrs['width'] = size
-        dial.attrs['height'] = size
-        return dial
-    else:
-        print(f"Warning: Dial for {param_name} is None")
-        return None
 
 @rt('/')
 def get():
@@ -1419,23 +1356,189 @@ async def get():
 # ----------------------------------------Dial--------------------------------------------
 # ------------------------------------------------------------------------------------------
 
-def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.0, optimizer_state=None):
-    SIZE = 200
-    RING_WIDTH = SIZE / 8
-    OUTER_RADIUS = SIZE / 2 - 5
-    INNER_RADIUS = OUTER_RADIUS - RING_WIDTH
-    CENTER = SIZE / 2
-    SCALE_MIN, SCALE_MAX = -1.0, 1.0
-    LINTHRESH = 0.01
-         
-    t = optimizer_state['t']    
-    if t > 0:
-        m_hat = m / (1 - optimizer_state['beta1'] ** t)
-        v_hat = v / (1 - optimizer_state['beta2'] ** t)
-        update = optimizer_state['lr'] * (m_hat / (math.sqrt(v_hat) + optimizer_state['eps']) + optimizer_state['weight_decay'] * data)        
-        z= -update
+class DialConfig(BaseModel):
+    SIZE: int = 200
+    SCALE_FACTOR: float = 0.4
+    SPACING: int = 10
+    RING_WIDTH: float = SIZE / 8
+    OUTER_RADIUS: float = SIZE / 2 - 5
+    INNER_RADIUS: float = OUTER_RADIUS - RING_WIDTH
+    CENTER: float = SIZE / 2
+    SCALE_MIN: float = -1.0
+    SCALE_MAX: float = 1.0
+    LINTHRESH: float = 0.01
+
+class ParameterState(BaseModel):
+    name: str
+    data: float
+    gradient: float
+    m: float
+    v: float
+
+class OptimizerState(BaseModel):
+    t: int
+    lr: float
+    beta1: float
+    beta2: float
+    eps: float
+    weight_decay: float
+
+class TrainingUpdate(BaseModel):
+    step: int
+    parameters: Dict[str, ParameterState]
+    optimizer: OptimizerState
+
+def calculate_grid_layout(total_params: int, dial_config: DialConfig, container_width: int, container_height: int) -> Dict[str, int]:
+    scaled_size = dial_config.SIZE * dial_config.SCALE_FACTOR
+    max_columns = max(1, (container_width + dial_config.SPACING) // (scaled_size + dial_config.SPACING))
+    rows = math.ceil(total_params / max_columns)
+    columns = min(max_columns, total_params)
+    
+    grid_width = columns * (scaled_size + dial_config.SPACING) - dial_config.SPACING
+    grid_height = rows * (scaled_size + dial_config.SPACING) - dial_config.SPACING
+    
+    start_x = (container_width - grid_width) / 2
+    start_y = (container_height - grid_height) / 2
+    
+    return {
+        "columns": columns,
+        "rows": rows,
+        "grid_width": grid_width,
+        "grid_height": grid_height,
+        "start_x": start_x,
+        "start_y": start_y,
+        "svg_width": max(container_width, grid_width + 2 * start_x),
+        "svg_height": max(container_height, grid_height + 2 * start_y),
+    }
+
+def create_main_parameter_dials(visualizer, container_width=800, container_height=400):
+    if not visualizer.model:
+        return Div("No model available", id="parameter-dials")
+
+    dial_config = DialConfig()
+    total_params = sum(len(neuron.w) + 1 for layer in visualizer.model.layers for neuron in layer.neurons)
+    layout = calculate_grid_layout(total_params, dial_config, container_width, container_height)
+
+    optimizer_state = visualizer.get_optimizer_state()
+    
+    m_ticks, m_labels = create_m_labels_and_ticks(dial_config)
+
+    dial_elements = [
+        create_positioned_dial(i, param, layout, dial_config, optimizer_state)
+        for i, param in enumerate(visualizer.model.parameters())
+    ]
+
+
+    return Svg(
+        Defs(
+            G(id="m-labels-and-ticks", *m_ticks, *m_labels)
+        ),        
+        *dial_elements,    
+        width="100%", height="100%", 
+        viewBox=f"0 0 {layout['svg_width']} {layout['svg_height']}",
+        preserveAspectRatio="xMidYMid meet",
+        id="parameter-dials-svg",
+        style="min-height: 400px;"
+    )
+
+def create_positioned_dial(i: int, param, layout: Dict[str, int], dial_config: DialConfig, optimizer_state: Dict):
+    scaled_size = dial_config.SIZE * dial_config.SCALE_FACTOR
+    cx = layout['start_x'] + (i % layout['columns']) * (scaled_size + dial_config.SPACING)
+    cy = layout['start_y'] + (i // layout['columns']) * (scaled_size + dial_config.SPACING)
+    
+    param_state = ParameterState(
+        name=f"param_{i}",
+        data=param.data if isinstance(param.data, (float, int)) else param.data.item(),
+        gradient=param.grad if isinstance(param.grad, (float, int)) else (param.grad.item() if param.grad is not None else 0.0),
+        m=getattr(param, 'm', 0.0),
+        v=getattr(param, 'v', 0.0)
+    )
+    
+    dial = create_parameter_dial(param_state.name, param_state.data, param_state.gradient, param_state.m, param_state.v, optimizer_state)
+    return G(dial, transform=f"translate({cx},{cy}) scale({dial_config.SCALE_FACTOR})")
+
+
+def calculate_updates(param: ParameterState, optimizer: OptimizerState):
+    m_lookahead = optimizer.beta1 * param.m + (1 - optimizer.beta1) * param.gradient
+    v_lookahead = optimizer.beta2 * param.v + (1 - optimizer.beta2) * (param.gradient ** 2)
+    sqrt_v_lookahead = math.sqrt(v_lookahead + optimizer.eps)
+    update_viz = -m_lookahead / sqrt_v_lookahead
+    
+    if optimizer.t > 0:
+        m_hat = m_lookahead / (1 - optimizer.beta1 ** optimizer.t)
+        v_hat = v_lookahead / (1 - optimizer.beta2 ** optimizer.t)
+        update_actual = optimizer.lr * (m_hat / (math.sqrt(v_hat) + optimizer.eps) + optimizer.weight_decay * param.data)
     else:
-        z=0        
+        update_actual = 0
+    
+    return m_lookahead, v_lookahead, update_viz, update_actual
+
+def create_m_labels_and_ticks(config: DialConfig):
+    outer_m_radius = config.INNER_RADIUS * 0.70
+    m_ticks = []
+    m_labels = []
+    label_distance = 0.7
+    m_values = [-1.00, -0.20, -0.02, 0.00, 0.02, 0.20, 1.00]
+
+    for i, value in enumerate(m_values):
+        angle = math.pi + (i / (len(m_values) - 1)) * math.pi
+        tick_start = angle_to_coords(angle, outer_m_radius, config.CENTER)
+        tick_end = angle_to_coords(angle, outer_m_radius + 5, config.CENTER)
+        m_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], stroke="#888", stroke_width=.8))
+        
+        text_width = len(f"{value:.2f}") * config.SIZE / 40
+        label_radius = outer_m_radius + label_distance + text_width / 2
+        label_pos = angle_to_coords(angle, label_radius, config.CENTER)
+        
+        rotation = (angle - math.pi) * 180 / math.pi
+        if rotation > 90 or rotation < -90:
+            rotation += 180
+        
+        m_labels.append(
+            Text(
+                f"{value:.2f}",
+                x=label_pos[0], y=label_pos[1],
+                font_size=config.SIZE/40,
+                fill="#888",
+                text_anchor="middle",
+                dominant_baseline="central",
+                transform=f"rotate({rotation} {label_pos[0]} {label_pos[1]})"
+            )
+        )
+    
+    return m_ticks, m_labels
+
+
+def create_parameter_dial(param_name: str, data: float, gradient: float, m: float, v: float, 
+                          optimizer_state: OptimizerState, config: DialConfig = DialConfig()):
+    SIZE = config.SIZE
+    CENTER = config.CENTER
+    OUTER_RADIUS, INNER_RADIUS = config.OUTER_RADIUS, config.INNER_RADIUS
+    RING_WIDTH = config.RING_WIDTH
+    SCALE_MIN, SCALE_MAX = config.SCALE_MIN, config.SCALE_MAX
+    LINTHRESH = config.LINTHRESH    
+
+         
+    t = optimizer_state['t']
+    
+    # Calculate lookahead values for m and v (without bias correction)
+    m_lookahead = optimizer_state['beta1'] * m + (1 - optimizer_state['beta1']) * gradient
+    v_lookahead = optimizer_state['beta2'] * v + (1 - optimizer_state['beta2']) * (gradient ** 2)
+    sqrt_v_lookahead = math.sqrt(v_lookahead + optimizer_state['eps'])
+    
+    # Calculate the update for visualization (matching the table in the original JavaScript)
+    update_viz = -m_lookahead / sqrt_v_lookahead
+    
+    # Calculate bias-corrected values and actual update (for parameter updates)
+    if t > 0:
+        m_hat = m_lookahead / (1 - optimizer_state['beta1'] ** t)
+        v_hat = v_lookahead / (1 - optimizer_state['beta2'] ** t)
+        update_actual = optimizer_state['lr'] * (m_hat / (math.sqrt(v_hat) + optimizer_state['eps']) + optimizer_state['weight_decay'] * data)
+    else:
+        update_actual = 0
+
+    # Use update_viz for visualization
+    z = update_viz      
     
     percentage = normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH)
     text_radius = (OUTER_RADIUS + INNER_RADIUS) / 2
@@ -1451,8 +1554,7 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     knob_x, knob_y = angle_to_coords(knob_angle, OUTER_RADIUS, CENTER)
     knob_end_x, knob_end_y = angle_to_coords(knob_angle, OUTER_RADIUS - knob_length, CENTER)
      
-
-    sqrt_v = math.sqrt(v)
+    
     outer_m_radius = INNER_RADIUS * 0.70 
     inner_v_radius = outer_m_radius * 0.6 
     m_text_radius = (outer_m_radius + inner_v_radius) * .5
@@ -1462,39 +1564,34 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     
     m_ticks = []
     m_labels = []
-    m_values = [-1.00, -0.20, -0.02, 0.00, 0.02, 0.20, 1.00]
-    
+    m_values = [-1.00, -0.20, -0.02, 0.00, 0.02, 0.20, 1.00]    
     label_distance = 0.7
-    for i, value in enumerate(m_values):
-        angle = math.pi + (i / (len(m_values) - 1)) * math.pi
-        tick_start = angle_to_coords(angle, outer_m_radius, CENTER)
-        tick_end = angle_to_coords(angle, outer_m_radius + 5, CENTER)
-        m_ticks.append(Line(x1=tick_start[0], y1=tick_start[1], x2=tick_end[0], y2=tick_end[1], stroke="#888", stroke_width=.8))                
-        text_width = len(f"{value:.2f}") * SIZE / 40 
-                
-        if angle > math.pi:  # Left side
-            label_radius = outer_m_radius + label_distance + text_width / 2
-        else:  # Right side
-            label_radius = outer_m_radius + label_distance + text_width / 2
+
+    m_labels_and_ticks = Use(href="#m-labels-and-ticks")
+
+    #     text_width = len(f"{value:.2f}") * config.SIZE / 40
         
-        label_pos = angle_to_coords(angle, label_radius, CENTER)
-                
-        rotation = (angle - math.pi) * 180 / math.pi
-        if rotation > 90 or rotation < -90:
-            rotation += 180
+    #     # Consistent label placement logic
+    #     label_radius = outer_m_radius + label_distance + text_width / 2
         
-        m_labels.append(
-            Text(
-                f"{value:.2f}",
-                x=label_pos[0], y=label_pos[1],
-                font_size=SIZE/40,
-                fill="#888",
-                text_anchor="middle",
-                dominant_baseline="central",
-                transform=f"rotate({rotation} {label_pos[0]} {label_pos[1]})"
-            )
-        )
-    
+    #     label_pos = angle_to_coords(angle, label_radius, CENTER)
+        
+    #     rotation = (angle - math.pi) * 180 / math.pi
+    #     if rotation > 90 or rotation < -90:
+    #         rotation += 180
+        
+    #     m_labels.append(
+    #         Text(
+    #             f"{value:.2f}",
+    #             x=label_pos[0], y=label_pos[1],
+    #             font_size=config.SIZE/40,
+    #             fill="#888",
+    #             text_anchor="middle",
+    #             dominant_baseline="central",
+    #             transform=f"rotate({rotation} {label_pos[0]} {label_pos[1]})"
+    #         )
+    #     )
+
     m_angle = pos_to_angle(m, log_scale_min, log_scale_max, LINTHRESH)    
     
     v_ticks = []    
@@ -1565,7 +1662,7 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
         center_x=CENTER,
         center_y=CENTER,
         radius=INNER_RADIUS,
-        current_v=v,        
+        current_v=sqrt_v_lookahead,        
         size=SIZE
     )
 
@@ -1603,12 +1700,12 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
     data_text = Text(
         f"{data:.4f}", x=SIZE/2, y=SIZE/2 + INNER_RADIUS/4,
         font_family="Arial, sans-serif", font_size=SIZE/8, font_weight="bold",
-        text_anchor="middle", dominant_baseline="central", fill="black"
+        text_anchor="middle", dominant_baseline="central", fill="black", data_id="data-value"
     )
 
-    text_path = Path(id="textPath", stroke="purple", stroke_width=2, fill="none")
-    text_path.M(*angle_to_coords(math.radians(135), text_radius, CENTER))
-    text_path.A(text_radius, text_radius, 0, 0, 0, *angle_to_coords(math.radians(45), text_radius, CENTER))
+    gradient_text_path = Path(id="gradientTextPath", stroke="purple", stroke_width=2, fill="none")
+    gradient_text_path.M(*angle_to_coords(math.radians(135), text_radius, CENTER))
+    gradient_text_path.A(text_radius, text_radius, 0, 0, 0, *angle_to_coords(math.radians(45), text_radius, CENTER))
 
     circle = partial(Circle, cx=CENTER, cy=CENTER)
 
@@ -1622,7 +1719,7 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
                  id="top-half-mask"
                  ),
             Filter(FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"), id="dropShadow",),
-            text_path, 
+            gradient_text_path, 
             
             
                      
@@ -1630,7 +1727,7 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
         circle(r=OUTER_RADIUS, fill=f"url(#{gradient_id})", mask="url(#dialMask)"),
         G(
             circle(r=INNER_RADIUS, fill="white", stroke="none"),
-            m_circle, v_circle, knob_path, *m_ticks, *m_labels, *v_ticks,            
+            m_circle, v_circle, knob_path, m_labels_and_ticks, *v_ticks,            
             blue_arrow,
             data_text, z_background, z_text,                                                      
             m_indicator, center_circle, sqrt_v_shape, 
@@ -1641,7 +1738,7 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
         Text(
             TextPath(
                 Tspan(f"{gradient:.4f}", dy="0.4em"),                
-                href="#textPath", startOffset="50%",
+                href="#gradientTextPath", startOffset="50%", data_id="gradient-value"
             ),
             font_family="Arial, sans-serif", font_size=SIZE/10, text_anchor="middle", fill="black"
         ),
@@ -1649,6 +1746,22 @@ def create_parameter_dial(param_name, data=1.0000, gradient=25.0000, m=0.1, v=1.
         width=SIZE, height=SIZE,
         viewBox=f"0 0 {SIZE} {SIZE}",                
     )     
+
+def setup_dial_gradients():
+        gradient_defs = {
+            'negative': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
+            'zeroed': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
+            'positive': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
+        }
+
+        return Defs(*[
+            LinearGradient(
+                *[Stop(offset=f"{i/(len(colors)-1)*100}%", 
+                    style=f"stop-color:{color};stop-opacity:1")
+                for i, color in enumerate(colors)],
+                id=f"dial-gradient-{key}", x1="0%", y1="0%", x2="100%", y2="100%",
+            ) for key, colors in gradient_defs.items()
+        ])
 
 def create_sqrt_v_visualization(param_name: str, center_x: float, center_y: float, radius: float, 
                                 current_v: float, size: float):    
@@ -1753,21 +1866,7 @@ def create_cylinder_gradients(param_name: str):
     return G(top_gradient, side_gradient, bottom_gradient)
 
 
-def setup_dial_gradients():
-    gradient_defs = {
-        'negative': ("#240b36", "#4a1042", "#711845", "#981f3c", "#b72435", "#c31432"),
-        'zeroed': ("#fdc830", "#fdc130", "#fcb130", "#fba130", "#f99130", "#f37335"),
-        'positive': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
-    }
 
-    return Defs(*[
-        LinearGradient(
-            *[Stop(offset=f"{i/(len(colors)-1)*100}%", 
-                   style=f"stop-color:{color};stop-opacity:1")
-              for i, color in enumerate(colors)],
-            id=f"dial-gradient-{key}", x1="0%", y1="0%", x2="100%", y2="100%",
-        ) for key, colors in gradient_defs.items()
-    ])
 
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
     attributes = {
