@@ -441,40 +441,40 @@ class Visualizer:
         # Now reset the training progress
         self.reset()
 
-    def train_step(self):
-        if not self.model or not self.train_split or not self.is_training:
+    def train_step(self):        
+        if not self.model or not self.train_split or not self.is_training:            
             return self.get_current_step()
         
-        if self.is_training:
+        if self.is_training:            
             # Perform one training step
             loss = self.loss_fun(self.train_split) 
-            loss.backward()
-            self.optimizer.step()
-            current_step = self.get_current_step()
-            self.history.append(current_step)
-
+            loss.backward()   
+            saved_grads = [p.grad if p.grad is not None else None for p in self.model.parameters()]
+                 
+            self.optimizer.step()            
             self.optimizer.zero_grad()
 
-            self.step_count += 1
-            self.train_losses.append(loss.data)
+            self.step_count += 1            
+            self.train_losses.append(loss.data)            
 
             # Evaluate validation loss every 10 steps
             if self.step_count % 10 == 0 and self.val_split:
                 val_loss = self.loss_fun(self.val_split) 
                 self.val_losses.append(val_loss.data)
-                                            
+
+            current_step = self.get_current_step(saved_grads)
+            self.history.append(current_step)
         return current_step
 
-    def get_current_step(self):
+    def get_current_step(self, saved_grads=None):
         param_state = {}
-        if self.model:
-            for i, p in enumerate(self.model.parameters()):
-                param_state[f'param_{i}'] = {
-                    'value': p.data.item() if hasattr(p.data, 'item') else float(p.data),
-                    'grad': p.grad.item() if (p.grad is not None and hasattr(p.grad, 'item')) else float(p.grad) if p.grad is not None else 0,
-                    'm': float(getattr(p, 'm', 0)),
-                    'v': float(getattr(p, 'v', 0))
-                }
+        for i, p in enumerate(self.model.parameters()):
+            param_state[f'param_{i}'] = {
+                'value': p.data if isinstance(p.data, float) else float(p.data),
+                'grad': saved_grads[i] if saved_grads and i < len(saved_grads) else 0,
+                'm': float(getattr(p, 'm', 0)),
+                'v': float(getattr(p, 'v', 0))
+            }
         return {
             'step_count': self.step_count,
             'train_loss': f"{self.train_losses[-1]:.6f}" if self.train_losses else "---",
@@ -626,26 +626,29 @@ const updateUI = {
         btn.classList.toggle('bg-red-500', state.isTraining);
         btn.classList.toggle('bg-green-500', !state.isTraining);
     },
-    progressTracker: (data) => {
-        if (data.step_count !== undefined) {
-            elements.stepText().textContent = `Step ${data.step_count}/100`;
+    progressTracker: ({ step_count, train_loss, val_loss, param_state }) => {
+        console.log("Updating progress tracker with data:", step_count, train_loss,);
+        if (step_count != null) {
+            elements.stepText().textContent = `Step ${step_count}/100`;
         }
-        if (data.train_loss !== undefined) {
-            elements.trainLossText().textContent = `Train loss: ${data.train_loss}`;
-            elements.trainLossText().dataset.value = data.train_loss;
+        if (train_loss != null) {
+            const trainLossElement = elements.trainLossText();
+            trainLossElement.textContent = `Train loss: ${train_loss}`;
+            trainLossElement.dataset.value = train_loss;
         }
-        if (data.val_loss !== undefined) {
-            elements.valLossText().textContent = `Validation loss: ${data.val_loss}`;
-            elements.valLossText().dataset.value = data.val_loss;
+        if (val_loss != null) {
+            const valLossElement = elements.valLossText();
+            valLossElement.textContent = `Validation loss: ${val_loss}`;
+            valLossElement.dataset.value = val_loss;
         }
-        elements.chartContainer().classList.toggle('hidden', data.step_count === 0);
-        if (data.step_count > 0) {
-            updateLossChart(data.step_count, parseFloat(data.train_loss), parseFloat(data.val_loss));
+        elements.chartContainer().classList.toggle('hidden', step_count === 0);
+        if (step_count > 0) {
+            updateLossChart(step_count, parseFloat(train_loss), parseFloat(val_loss));
         }
-        if (data.param_state !== undefined) {
-            updateParameterDials(data.param_state);
+        if (param_state) {
+            updateParameterDials(param_state);
         }
-        document.dispatchEvent(new CustomEvent('progressUpdated', { detail: data }));
+        document.dispatchEvent(new CustomEvent('progressUpdated', { detail: { step_count, train_loss, val_loss, param_state } }));
     }
 };
 
@@ -1808,8 +1811,7 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
     OUTER_RADIUS, INNER_RADIUS = config.OUTER_RADIUS, config.INNER_RADIUS
     RING_WIDTH = config.RING_WIDTH
     SCALE_MIN, SCALE_MAX = config.SCALE_MIN, config.SCALE_MAX
-    LINTHRESH = config.LINTHRESH    
-    print("the gradient is ", gradient)
+    LINTHRESH = config.LINTHRESH        
          
     t = optimizer_state['t']
     
