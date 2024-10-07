@@ -1422,9 +1422,10 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
     optimizer_state = visualizer.get_optimizer_state()
     
     base_dial = create_base_dial(dial_config)
-    
+    base_knob = create_base_knob_path(dial_config)
+
     common_defs = Defs(
-        G(base_dial, id="base-dial"),
+        G(base_dial, id="base-dial"),        
         Mask(
         Rect(x=0, y=0, width=dial_config.SIZE, height=dial_config.SIZE, fill="white"),
         create_outer_dial_mask_path(dial_config),
@@ -1437,15 +1438,21 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
         Filter(
             FeDropShadow(dx="4", dy="4", stdDeviation="3", flood_opacity="0.3"),
             id="dropShadow"
-        ),        
-        create_outer_dial_gradient_text_path((dial_config.OUTER_RADIUS + dial_config.INNER_RADIUS) / 2, dial_config.CENTER)
+        ),                
+        create_outer_dial_gradient_text_path((dial_config.OUTER_RADIUS + dial_config.INNER_RADIUS) / 2, dial_config.CENTER),
+        *setup_dial_gradients(),    
+        Circle(dial_config.OUTER_RADIUS, dial_config.CENTER, dial_config.CENTER, mask="url(#dialMask)", id="gradient-base"),        
+        G(            
+            Circle(dial_config.INNER_RADIUS, dial_config.CENTER, dial_config.CENTER, fill="white", stroke="none"),
+            base_knob,
+            id="knob-circle-group"
+        )
     )
 
     dial_elements = [
         create_positioned_dial(i, param, layout, dial_config, optimizer_state)
         for i, param in enumerate(visualizer.model.parameters())
     ]
-
 
     return Svg(
         common_defs,      
@@ -1516,6 +1523,20 @@ def create_outer_dial_gradient_text_path(text_radius, CENTER):
             .M(*start)
             .A(text_radius, text_radius, 0, 0, 0, *end))
 
+def create_base_knob_path(config: DialConfig):
+    knob_width, knob_length = config.RING_WIDTH, config.RING_WIDTH * 1.1
+    knob_angle = 0 
+
+    knob_x, knob_y = angle_to_coords(knob_angle, config.OUTER_RADIUS, config.CENTER)
+    knob_end_x, knob_end_y = angle_to_coords(knob_angle, config.OUTER_RADIUS - knob_length, config.CENTER)
+
+    return (Path(fill="white")
+            .M(knob_x, knob_y)
+            .L(knob_end_x + knob_width/2 * math.sin(knob_angle), 
+               knob_end_y - knob_width/2 * math.cos(knob_angle))
+            .L(knob_end_x - knob_width/2 * math.sin(knob_angle), 
+               knob_end_y + knob_width/2 * math.cos(knob_angle))
+            .Z())
 
 def calculate_updates(param: ParameterState, optimizer: OptimizerState):
     m_lookahead = optimizer.beta1 * param.m + (1 - optimizer.beta1) * param.gradient
@@ -1619,21 +1640,16 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
     # Use update_viz for visualization
     z = update_viz      
     
+
+    gradient_key = 'negative' if gradient < 0 else 'positive' if gradient > 0 else 'zeroed'
+    gradient_id = f"dial-gradient-{gradient_key}"
     percentage = normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH)
-    
-       
-    
-    knob_angle = math.radians(180 + percentage * 1.8)        
-    knob_width, knob_length = RING_WIDTH, RING_WIDTH * 1.1
-    knob_x, knob_y = angle_to_coords(knob_angle, OUTER_RADIUS, CENTER)
-    knob_end_x, knob_end_y = angle_to_coords(knob_angle, OUTER_RADIUS - knob_length, CENTER)
-     
+    rotation_angle = 180 + percentage * 1.8   
     
     outer_m_radius = INNER_RADIUS * 0.70 
     inner_v_radius = outer_m_radius * 0.6 
     m_text_radius = (outer_m_radius + inner_v_radius) * .5
-            
-    base_dial = Use(href="#base-dial")    
+                
     m_angle = pos_to_angle(m, config)    
     
 
@@ -1669,13 +1685,7 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
         x2=angle_to_coords(m_angle, outer_m_radius * 1.15, CENTER)[0],
         y2=angle_to_coords(m_angle, outer_m_radius * 1.15, CENTER)[1],
         stroke="#372572", stroke_width=2
-    )
-    center_circle = Circle(
-    cx=SIZE/2,
-    cy=SIZE/2,
-    r=3,
-    fill="#372572"
-)
+    )   
         
     arrow_length = abs(gradient) * (1 - optimizer_state['beta1']) * (OUTER_RADIUS - INNER_RADIUS)        
     max_arrow_length = (OUTER_RADIUS - INNER_RADIUS) * 0.5
@@ -1693,15 +1703,6 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
         size=SIZE
     )
 
-    gradient_key = 'negative' if gradient < 0 else 'positive' if gradient > 0 else 'zeroed'
-    gradient_id = f"dial-gradient-{gradient_key}"
-
-
-    knob_path = Path(fill="white").M(knob_x, knob_y)
-    knob_path.L(knob_end_x + knob_width/2 * math.sin(knob_angle), knob_end_y - knob_width/2 * math.cos(knob_angle))
-    knob_path.L(knob_end_x - knob_width/2 * math.sin(knob_angle), knob_end_y + knob_width/2 * math.cos(knob_angle))
-    knob_path.Z()
-    
     z_color = "#4CAF50" if z > 0 else "#F44336"
     z_triangle = "▲" if z > 0 else "▼"    
     rect_width, rect_height = SIZE * 0.4, SIZE * 0.07
@@ -1727,21 +1728,19 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
         font_family="Arial, sans-serif", font_size=SIZE/8, font_weight="bold",
         text_anchor="middle", dominant_baseline="central", fill="black", data_id="data-value"
     )
-
-    circle = partial(Circle, cx=CENTER, cy=CENTER)
-
     return Svg(
-        setup_dial_gradients(),
-        
-        circle(r=OUTER_RADIUS, fill=f"url(#{gradient_id})", mask="url(#dialMask)"),
+        Use(href="#gradient-base", fill=f"url(#{gradient_id})"),
         G(
-            circle(r=INNER_RADIUS, fill="white", stroke="none"),
-            base_dial, knob_path,            
+            Use(href="#knob-circle-group"),
+            transform=f"rotate({rotation_angle} {config.CENTER} {config.CENTER})",
+            filter="url(#dropShadow)"
+        ),
+        G(            
+            Use(href="#base-dial"),          
             blue_arrow,
             data_text, z_background, z_text,                                                      
-            m_indicator, center_circle, sqrt_v_shape, 
-            m_bean_group,
-            filter="url(#dropShadow)"
+            m_indicator, sqrt_v_shape, 
+            m_bean_group,            
         ),        
        
         Text(
@@ -1763,14 +1762,14 @@ def setup_dial_gradients():
             'positive': ("#11998e", "#1eac8e", "#2aba8e", "#35c78d", "#37d18b", "#38db89", "#38ef7d")
         }
 
-        return Defs(*[
+        return [
             LinearGradient(
                 *[Stop(offset=f"{i/(len(colors)-1)*100}%", 
                     style=f"stop-color:{color};stop-opacity:1")
                 for i, color in enumerate(colors)],
                 id=f"dial-gradient-{key}", x1="0%", y1="0%", x2="100%", y2="100%",
             ) for key, colors in gradient_defs.items()
-        ])
+        ]
 
 def create_sqrt_v_visualization(param_name: str, center_x: float, center_y: float, radius: float, 
                                 current_v: float, size: float):    
