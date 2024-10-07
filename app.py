@@ -649,8 +649,30 @@ const updateUI = {
     }
 };
 
+let dialConfig;
+
+function initializeDialConfig() {
+    const configElement = document.getElementById('dial-config');
+    if (configElement && configElement.value) {
+        try {
+            dialConfig = JSON.parse(configElement.value);            
+        } catch (error) {
+            console.error('Error parsing dial configuration:', error);
+            console.log('Raw configuration value:', configElement.value);
+        }
+    } else {
+        console.error('Dial configuration element not found or empty');
+    }
+}
+
+
 const updateParameterDials = (paramState) => {    
-    Object.entries(paramState).forEach(([key, { value, grad }]) => {
+    if (!dialConfig) {
+        console.error('Dial configuration not initialized. Cannot update dials.');
+        return;
+    }
+
+    Object.entries(paramState).forEach(([key, param]) => {
         const dial = document.getElementById(key);        
         if (!dial) {
             console.warn(`Dial not found for ${key}`);
@@ -658,25 +680,143 @@ const updateParameterDials = (paramState) => {
         }
 
         const dataText = dial.querySelector('[data-id="data-value"]');
-        const gradientText = dial.querySelector('[data-id="gradient-value"]');        
+        const gradientText = dial.querySelector('tspan[data-id="gradient-value"]');       
+        const mBeanGroup = dial.querySelector('[data-id="m-bean-group"]');
+        const mIndicator = dial.querySelector('[data-id="m-indicator"]');
+        const knobGroup = dial.querySelector('g[data-rotation-angle]');
+        const gradientBase = dial.querySelector('use[href="#gradient-base"]');
 
-        if (!dataText || !gradientText) {
+        if (!dataText || !gradientText || !mIndicator || !knobGroup || !gradientBase) {
             console.warn(`Some elements not found for ${key}`);
             return;
         }
 
         // Update data value
-        dataText.textContent = value?.toFixed(4) ?? dataText.textContent;        
+        if (param.value !== undefined) {
+            dataText.textContent = param.value.toFixed(4);
+        }
 
         // Update gradient value
-        const tspan = gradientText.querySelector('tspan');
-        if (tspan) {
-            tspan.textContent = grad?.toFixed(4) ?? tspan.textContent;            
-        } else {
-            console.warn(`No tspan found in gradientText for ${key}`);
+        if (param.grad !== undefined) {
+            gradientText.textContent = param.grad.toFixed(4);
+        }
+
+        // Update gradient
+        const gradientKey = param.grad < 0 ? 'negative' : param.grad > 0 ? 'positive' : 'zeroed';
+        gradientBase.setAttribute('fill', `url(#dial-gradient-${gradientKey})`);
+        gradientBase.dataset.gradientKey = gradientKey;
+
+        // Update rotation
+        try {
+            const percentage = normalizeGradient(param.grad, dialConfig.SCALE_MIN, dialConfig.SCALE_MAX, dialConfig.LINTHRESH);
+            if (isNaN(percentage)) {
+                console.error(`Normalized gradient is NaN for ${key}. Gradient: ${param.grad}`);
+                return;
+            }
+            const rotationAngle = 180 + percentage * 1.8;
+            if (isNaN(rotationAngle)) {
+                console.error(`Rotation angle is NaN for ${key}. Percentage: ${percentage}`);
+                return;
+            }
+            knobGroup.setAttribute('transform', `rotate(${rotationAngle} ${dialConfig.CENTER} ${dialConfig.CENTER})`);
+            knobGroup.dataset.rotationAngle = rotationAngle;
+        } catch (error) {
+            console.error(`Error updating rotation for ${key}:`, error);
+        }
+
+        // Update m-related elements
+        if (param.m !== undefined) {
+            const m_angle = pos_to_angle(param.m, dialConfig);            
+            const outer_m_radius = dialConfig.INNER_RADIUS * 0.70;
+
+            // Update m indicator
+            const mIndicator = dial.querySelector('[data-id="m-indicator"]');
+            if (mIndicator) {
+                const [x2, y2] = angleToCoords(m_angle, outer_m_radius * 1.15, dialConfig.CENTER);
+                mIndicator.setAttribute('x1', dialConfig.CENTER);
+                mIndicator.setAttribute('y1', dialConfig.CENTER);
+                mIndicator.setAttribute('x2', x2);
+                mIndicator.setAttribute('y2', y2);
+            }
+
+            const buffer_angle = 12 * Math.PI / 180;
+            const text_arc_length = 40 * Math.PI / 180;
+            let mBeanGroup = dial.querySelector('[data-id="m-bean-group"]');
+            if (param.m !== 0) {
+                if (!mBeanGroup) {
+                    mBeanGroup = createMBeanGroup(key, param.m, dialConfig);
+                    dial.appendChild(mBeanGroup);
+                }                                
+                const adjusted_angle = param.m >= 0 ? m_angle - buffer_angle - text_arc_length : m_angle + buffer_angle;
+                rotation_degrees = adjusted_angle * 180 / Math.PI;
+                
+                mBeanGroup.setAttribute('transform', `rotate(${rotation_degrees} ${dialConfig.CENTER} ${dialConfig.CENTER})`);
+
+                // Update the text content
+                const textPath = mBeanGroup.querySelector('textPath');
+                if (textPath) {
+                    textPath.textContent = param.m.toFixed(4);
+                }
+            } else if (mBeanGroup) {
+                mBeanGroup.remove();
+            }
+
+            
         }
     });
 };
+
+function createMBeanGroup(paramName, m, config) {
+    const mBeanGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    mBeanGroup.setAttribute("data-id", "m-bean-group");
+
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", "#base-m-bean");
+    mBeanGroup.appendChild(use);
+
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("font-family", "Arial, sans-serif");
+    text.setAttribute("font-size", config.SIZE / 30);
+    text.setAttribute("fill", "white");
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("dominant-baseline", "central");
+
+    const textPath = document.createElementNS("http://www.w3.org/2000/svg", "textPath");
+    textPath.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", "#base-m-text-path");
+    textPath.setAttribute("startOffset", "50%");
+    textPath.textContent = m.toFixed(4);
+
+    text.appendChild(textPath);
+    mBeanGroup.appendChild(text);
+
+    return mBeanGroup;
+}
+
+function symlog_scale(x, linthresh) {
+    return Math.sign(x) * Math.log1p(Math.abs(x) / linthresh);
+}
+
+function pos_to_angle(pos, config) {
+    const log_scale_min = symlog_scale(config.SCALE_MIN, config.LINTHRESH);
+    const log_scale_max = symlog_scale(config.SCALE_MAX, config.LINTHRESH);
+    return Math.PI + (symlog_scale(pos, config.LINTHRESH) - log_scale_min) / (log_scale_max - log_scale_min) * Math.PI;
+}
+
+function angleToCoords(angle, radius, center) {
+    return [
+        center + radius * Math.cos(angle),
+        center + radius * Math.sin(angle)
+    ];
+}
+
+function normalizeGradient(gradient, scaleMin, scaleMax, linthresh) {
+    const symlogScale = x => Math.sign(x) * Math.log1p(Math.abs(x) / linthresh);
+    const logGradient = symlogScale(gradient);
+    const logMin = symlogScale(scaleMin);
+    const logMax = symlogScale(scaleMax);
+    return (logGradient - logMin) / (logMax - logMin) * 100;
+}
+
 const updateSSEConnection = () => {
     if (state.eventSource) {
         console.log('Closing existing SSE connection');
@@ -881,6 +1021,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateSSEConnection();
     initChart();
     initializeSvgPanZoom();
+    initializeDialConfig(); 
 });
 """
 
@@ -986,6 +1127,19 @@ def create_hyperparameter_controls(optimizer_state):
 
 @rt('/')
 def get():
+    dial_config = DialConfig()
+    
+    dial_config_json = json.dumps({
+        "CENTER": dial_config.CENTER,
+        "INNER_RADIUS": dial_config.INNER_RADIUS,
+        "OUTER_RADIUS": dial_config.OUTER_RADIUS,
+        "SCALE_MIN": dial_config.SCALE_MIN,
+        "SCALE_MAX": dial_config.SCALE_MAX,
+        "LINTHRESH": dial_config.LINTHRESH,
+        "RING_WIDTH": dial_config.RING_WIDTH,
+        "SIZE": dial_config.SIZE
+    })
+
     return Title("Micrograd Visualizer"),Div(                
         H1("Micrograd Visualizer", cls="text-3xl font-bold mb-4 w-full text-center"),
         Div(
@@ -1035,7 +1189,8 @@ def get():
                     H3("Optimizer State", cls="text-xl font-semibold mb-2"),
                     create_hyperparameter_controls(visualizer.get_optimizer_state()),
                      Div(
-                        create_main_parameter_dials(visualizer),
+                        Input(type="hidden", id="dial-config", value=dial_config_json),
+                        create_main_parameter_dials(visualizer, dial_config=dial_config),
                         id="parameter-dials",
                         cls="w-full h-[400px] overflow-hidden"
                     ),
@@ -1411,19 +1566,21 @@ def calculate_grid_layout(total_params: int, dial_config: DialConfig, container_
         "svg_height": max(container_height, grid_height + 2 * start_y),
     }
 
-def create_main_parameter_dials(visualizer, container_width=800, container_height=400):
+def create_main_parameter_dials(visualizer, container_width=800, container_height=400, dial_config=None):
     if not visualizer.model:
-        return Div("No model available", id="parameter-dials")
+        return Div("No model available", id="parameter-dials")    
+    
+    current_step = visualizer.get_current_step()
+    param_states = current_step['param_state']
 
-    dial_config = DialConfig()
     total_params = sum(len(neuron.w) + 1 for layer in visualizer.model.layers for neuron in layer.neurons)
     layout = calculate_grid_layout(total_params, dial_config, container_width, container_height)
 
     optimizer_state = visualizer.get_optimizer_state()
     
     base_dial = create_base_dial(dial_config)
-    base_knob = create_base_knob_path(dial_config)
-
+    base_knob = create_base_knob_path(dial_config)    
+    base_m_bean = create_base_m_bean(dial_config)
     common_defs = Defs(
         G(base_dial, id="base-dial"),        
         Mask(
@@ -1444,14 +1601,15 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
         Circle(dial_config.OUTER_RADIUS, dial_config.CENTER, dial_config.CENTER, mask="url(#dialMask)", id="gradient-base"),        
         G(            
             Circle(dial_config.INNER_RADIUS, dial_config.CENTER, dial_config.CENTER, fill="white", stroke="none"),
-            base_knob,
+            base_knob,            
             id="knob-circle-group"
-        )
+        ), 
+       G(base_m_bean, id="base-m-bean"),       
     )
 
     dial_elements = [
-        create_positioned_dial(i, param, layout, dial_config, optimizer_state)
-        for i, param in enumerate(visualizer.model.parameters())
+        create_positioned_dial(i, param_states[f'param_{i}'], layout, dial_config, optimizer_state)
+        for i in range(total_params)
     ]
 
     return Svg(
@@ -1462,22 +1620,14 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
         preserveAspectRatio="xMidYMid meet",
         id="parameter-dials-svg",
         style="min-height: 400px;"
-    )
+    )    
 
-def create_positioned_dial(i: int, param, layout: Dict[str, int], dial_config: DialConfig, optimizer_state: Dict):
+def create_positioned_dial(i: int, param_state: Dict, layout: Dict[str, int], dial_config: DialConfig, optimizer_state: Dict):
     scaled_size = dial_config.SIZE * dial_config.SCALE_FACTOR
     cx = layout['start_x'] + (i % layout['columns']) * (scaled_size + dial_config.SPACING)
     cy = layout['start_y'] + (i // layout['columns']) * (scaled_size + dial_config.SPACING)
     
-    param_state = ParameterState(
-        name=f"param_{i}",
-        data=param.data if isinstance(param.data, (float, int)) else param.data.item(),
-        gradient=param.grad if isinstance(param.grad, (float, int)) else (param.grad.item() if param.grad is not None else 0.0),
-        m=getattr(param, 'm', 0.0),
-        v=getattr(param, 'v', 0.0)
-    )
-    
-    dial = create_parameter_dial(param_state.name, param_state.data, param_state.gradient, param_state.m, param_state.v, optimizer_state)
+    dial = create_parameter_dial(f"param_{i}", param_state['value'], param_state['grad'], param_state['m'], param_state['v'], optimizer_state)
     return G(dial, transform=f"translate({cx},{cy}) scale({dial_config.SCALE_FACTOR})")
 
 def create_base_dial(config: DialConfig):
@@ -1514,6 +1664,48 @@ def create_base_dial(config: DialConfig):
     base_dial(*[m_labels_and_ticks])
     
     return base_dial
+
+def create_base_m_bean(config):
+    outer_m_radius = config.INNER_RADIUS * 0.70
+    inner_v_radius = outer_m_radius * 0.6
+    m_text_radius = (outer_m_radius + inner_v_radius) * 0.5
+
+    outer_bean_radius = m_text_radius * 1.15
+    inner_bean_radius = m_text_radius * 0.85
+    text_radius = (outer_bean_radius + inner_bean_radius) / 2
+        
+    start_angle = 0
+    end_angle = math.radians(40)
+    center = config.CENTER
+    edge_radius = (outer_bean_radius - inner_bean_radius) / 2
+
+    bean_path = (Path(fill="#372572", opacity="0.8", id="base-m-bean")
+            .M(center + outer_bean_radius * math.cos(start_angle), 
+               center + outer_bean_radius * math.sin(start_angle))
+            .A(outer_bean_radius, outer_bean_radius, 0, 0, 1, 
+               center + outer_bean_radius * math.cos(end_angle), 
+               center + outer_bean_radius * math.sin(end_angle))
+            .A(edge_radius, edge_radius, 0, 0, 1,
+               center + inner_bean_radius * math.cos(end_angle),
+               center + inner_bean_radius * math.sin(end_angle))
+            .A(inner_bean_radius, inner_bean_radius, 0, 0, 0,
+               center + inner_bean_radius * math.cos(start_angle),
+               center + inner_bean_radius * math.sin(start_angle))
+            .A(edge_radius, edge_radius, 0, 0, 1,
+               center + outer_bean_radius * math.cos(start_angle),
+               center + outer_bean_radius * math.sin(start_angle))
+            .Z())
+         
+    text_path = (Path(fill="none", id="base-m-text-path")
+        .M(center + text_radius * math.cos(start_angle), 
+           center + text_radius * math.sin(start_angle))
+        .A(text_radius, text_radius, 0, 0, 1, 
+           center + text_radius * math.cos(end_angle), 
+           center + text_radius * math.sin(end_angle))
+    )
+
+
+    return G(bean_path, text_path)
 
 def create_outer_dial_gradient_text_path(text_radius, CENTER):
     start = angle_to_coords(math.radians(135), text_radius, CENTER)
@@ -1617,7 +1809,7 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
     RING_WIDTH = config.RING_WIDTH
     SCALE_MIN, SCALE_MAX = config.SCALE_MIN, config.SCALE_MAX
     LINTHRESH = config.LINTHRESH    
-
+    print("the gradient is ", gradient)
          
     t = optimizer_state['t']
     
@@ -1640,11 +1832,11 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
     # Use update_viz for visualization
     z = update_viz      
     
-
     gradient_key = 'negative' if gradient < 0 else 'positive' if gradient > 0 else 'zeroed'
     gradient_id = f"dial-gradient-{gradient_key}"
     percentage = normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH)
     rotation_angle = 180 + percentage * 1.8   
+    
     
     outer_m_radius = INNER_RADIUS * 0.70 
     inner_v_radius = outer_m_radius * 0.6 
@@ -1652,39 +1844,46 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
                 
     m_angle = pos_to_angle(m, config)    
     
+    m_bean_group = G(
+        Use(href="#base-m-bean"),        
+        Text(
+            TextPath(
+            f"{m:.4f}",
+            href="#base-m-text-path",
+            startOffset="50%"
+            ),
+            font_family="Arial, sans-serif",
+            font_size=config.SIZE/30,
+            font_weight="bold",
+            fill="white",
+            text_anchor="middle",
+            dominant_baseline="central"
+        ),
+        id=f"{param_name}-m-bean-group",        
+        data_id="m-bean-group"
+    ) if m != 0 else None
 
+    buffer_angle = math.radians(12) 
+    text_arc_length = math.radians(40)  
 
-    buffer_angle = math.radians(12)
-    text_arc_length = math.radians(40)
     if m >= 0:
-        end_angle = m_angle - buffer_angle
-        start_angle = end_angle - text_arc_length
+        adjusted_angle = m_angle - buffer_angle - text_arc_length
     else:
-        start_angle = m_angle + buffer_angle
-        end_angle = start_angle + text_arc_length
+        adjusted_angle = m_angle + buffer_angle
 
-    outer_bean_radius = m_text_radius * 1.15
-    inner_bean_radius = m_text_radius * 0.85    
+    rotation_degrees = math.degrees(adjusted_angle)
 
-    m_bean_group = create_m_bean_with_text(
-        param_name,
-        m,
-        SIZE,
-        start_angle,
-        end_angle,
-        outer_bean_radius,
-        inner_bean_radius
-    )
-
-    if m == 0:
-        m_bean_group = None
+    rotated_m_bean_group = G(
+        m_bean_group, 
+        transform=f"rotate({rotation_degrees} {config.CENTER} {config.CENTER})"
+    ) if m_bean_group else None
 
     m_indicator = Line(
         x1=CENTER,
         y1=CENTER,
         x2=angle_to_coords(m_angle, outer_m_radius * 1.15, CENTER)[0],
         y2=angle_to_coords(m_angle, outer_m_radius * 1.15, CENTER)[1],
-        stroke="#372572", stroke_width=2
+        stroke="#372572", stroke_width=2, data_id="m-indicator"
     )   
         
     arrow_length = abs(gradient) * (1 - optimizer_state['beta1']) * (OUTER_RADIUS - INNER_RADIUS)        
@@ -1728,25 +1927,27 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
         font_family="Arial, sans-serif", font_size=SIZE/8, font_weight="bold",
         text_anchor="middle", dominant_baseline="central", fill="black", data_id="data-value"
     )
-    return Svg(
-        Use(href="#gradient-base", fill=f"url(#{gradient_id})"),
+    return Svg(        
+        Use(href="#gradient-base", fill=f"url(#{gradient_id})", data_gradient_key=gradient_key),
         G(
             Use(href="#knob-circle-group"),
             transform=f"rotate({rotation_angle} {config.CENTER} {config.CENTER})",
-            filter="url(#dropShadow)"
+            filter="url(#dropShadow)",
+            data_rotation_angle=rotation_angle
         ),
         G(            
             Use(href="#base-dial"),          
             blue_arrow,
             data_text, z_background, z_text,                                                      
-            m_indicator, sqrt_v_shape, 
-            m_bean_group,            
+            m_indicator,
+            rotated_m_bean_group,
+            sqrt_v_shape, 
         ),        
        
         Text(
             TextPath(
-                Tspan(f"{gradient:.4f}", dy="0.4em"),                
-                href="#gradientTextPath", startOffset="50%", data_id="gradient-value"
+                Tspan(f"{gradient:.4f}", dy="0.4em", data_id="gradient-value"),                
+                href="#gradientTextPath", startOffset="50%",
             ),
             font_family="Arial, sans-serif", font_size=SIZE/10, text_anchor="middle", fill="black"
         ),
@@ -1981,35 +2182,12 @@ def create_sqrtv_shape_with_cutout_text(shape, text, font_size, param_name, text
 
     return shape, mask
 
-def create_m_bean_with_text(param_name, m, size, start_angle, end_angle, outer_radius, inner_radius):
-    center = size / 2
-    text_radius = (outer_radius + inner_radius) / 2
-    
-    bean_shape = create_bean_shape(center, center, outer_radius, inner_radius, start_angle, end_angle)
-    bean_shape.fill = "#372572"  # Purple color
-    
-    text_path = Path(id=f"{param_name}-m-text-path", fill="none")
-    text_path.M(center + text_radius * math.cos(start_angle), 
-                center + text_radius * math.sin(start_angle))
-    text_path.A(text_radius, text_radius, 0, 0, 1, 
-                center + text_radius * math.cos(end_angle), 
-                center + text_radius * math.sin(end_angle))
-    
-    text_element = Text(
-        TextPath(
-            f"{m:.4f}",
-            href=f"#{param_name}-m-text-path",
-            startOffset="50%"
-        ),
-        font_family="Arial, sans-serif",
-        font_size=size/30,
-        font_weight="bold",
-        fill="white",
-        text_anchor="middle",
-        dominant_baseline="central"
-    )
-    
-    return G(bean_shape, text_path, text_element)
+def create_base_m_bean_definitions(config: DialConfig):
+    radii = (config.INNER_RADIUS * 0.70 * factor for factor in (1.15, 0.85))
+    bean_shape = create_bean_shape(config.CENTER, config.CENTER, *radii, 0, math.radians(40))
+    bean_shape.fill = "#372572"
+    bean_shape.id = "base-m-bean"
+    return bean_shape
 
 def create_arrow_path(center_x, center_y, gradient, max_gradient, m_angle, inner_radius, size):
     arc_radius = inner_radius * 0.76
