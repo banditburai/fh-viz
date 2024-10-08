@@ -395,7 +395,7 @@ class Visualizer:
 
     def initialize_model(self):
         self.model = MLP(2, [8, 3])
-        self.optimizer = AdamW(self.model.parameters(), lr=1e-1, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-4)
+        self.optimizer = AdamW(self.model.parameters(), lr=1e-1, betas=(0.9, 0.95), eps=1e-8, weight_decay=1e-4)
 
     def get_optimizer_state(self):
         return {
@@ -419,11 +419,10 @@ class Visualizer:
         self.history = []
         
         # Reset model parameters to initial values
-        for p in self.model.parameters():
-            p.data = random.uniform(-0.1, 0.1)
+        self.train_split, self.val_split, self.test_split = gen_data_yinyang(random, n=100)
         
         # Reset optimizer
-        self.optimizer = AdamW(self.model.parameters(), lr=1e-1, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-4)
+        self.optimizer = AdamW(self.model.parameters(), lr=1e-1, betas=(0.9, 0.95), eps=1e-8, weight_decay=1e-4)
 
         # Reset progress tracker
         self.progress_tracker = {
@@ -445,33 +444,32 @@ class Visualizer:
         if not self.model or not self.train_split or not self.is_training:            
             return self.get_current_step()
         
-        if self.is_training:            
-            # Perform one training step
-            loss = self.loss_fun(self.train_split) 
-            loss.backward()   
-            saved_grads = [p.grad if p.grad is not None else None for p in self.model.parameters()]
-                 
-            self.optimizer.step()            
+        if self.is_training: 
+            # 1. Zero the gradients
             self.optimizer.zero_grad()
+            # 2. Compute loss and backward pass
+            loss = self.loss_fun(self.train_split)
+            loss.backward()
+            
+            # 3. Optimizer step
+            self.optimizer.step()
 
-            self.step_count += 1            
-            self.train_losses.append(loss.data)            
+            self.step_count += 1
+            self.train_losses.append(loss.data)
 
             # Evaluate validation loss every 10 steps
             if self.step_count % 10 == 0 and self.val_split:
-                val_loss = self.loss_fun(self.val_split) 
+                val_loss = self.loss_fun(self.val_split)
                 self.val_losses.append(val_loss.data)
+            
+        return self.get_current_step()
 
-            current_step = self.get_current_step(saved_grads)
-            self.history.append(current_step)
-        return current_step
-
-    def get_current_step(self, saved_grads=None):
+    def get_current_step(self):
         param_state = {}
         for i, p in enumerate(self.model.parameters()):
             param_state[f'param_{i}'] = {
                 'value': p.data if isinstance(p.data, float) else float(p.data),
-                'grad': saved_grads[i] if saved_grads and i < len(saved_grads) else 0,
+                'grad': float(p.grad) if p.grad is not None else 0,
                 'm': float(getattr(p, 'm', 0)),
                 'v': float(getattr(p, 'v', 0))
             }
@@ -626,8 +624,7 @@ const updateUI = {
         btn.classList.toggle('bg-red-500', state.isTraining);
         btn.classList.toggle('bg-green-500', !state.isTraining);
     },
-    progressTracker: ({ step_count, train_loss, val_loss, param_state }) => {
-        console.log("Updating progress tracker with data:", step_count, train_loss,);
+    progressTracker: ({ step_count, train_loss, val_loss, param_state }) => {        
         if (step_count != null) {
             elements.stepText().textContent = `Step ${step_count}/100`;
         }
@@ -675,6 +672,14 @@ const updateParameterDials = (paramState) => {
         return;
     }
 
+    const optimizerParams = {
+        lr: parseFloat(document.getElementById('lr-select').value),
+        beta1: parseFloat(document.getElementById('beta1-select').value),
+        beta2: parseFloat(document.getElementById('beta2-select').value),
+        eps: parseFloat(document.getElementById('eps-select').value),
+        weight_decay: parseFloat(document.getElementById('weight-decay-select').value)
+    };
+    
     Object.entries(paramState).forEach(([key, param]) => {
         const dial = document.getElementById(key);        
         if (!dial) {
@@ -688,6 +693,7 @@ const updateParameterDials = (paramState) => {
         const mIndicator = dial.querySelector('[data-id="m-indicator"]');
         const knobGroup = dial.querySelector('g[data-rotation-angle]');
         const gradientBase = dial.querySelector('use[href="#gradient-base"]');
+        const sqrtVText = dial.querySelector('[data-id="sqrt-v-value"]');
 
         if (!dataText || !gradientText || !mIndicator || !knobGroup || !gradientBase) {
             console.warn(`Some elements not found for ${key}`);
@@ -703,7 +709,7 @@ const updateParameterDials = (paramState) => {
         if (param.grad !== undefined) {
             gradientText.textContent = param.grad.toFixed(4);
         }
-
+        
         // Update gradient
         const gradientKey = param.grad < 0 ? 'negative' : param.grad > 0 ? 'positive' : 'zeroed';
         gradientBase.setAttribute('fill', `url(#dial-gradient-${gradientKey})`);
@@ -727,9 +733,16 @@ const updateParameterDials = (paramState) => {
             console.error(`Error updating rotation for ${key}:`, error);
         }
 
+        const m_lookahead = optimizerParams.beta1 * param.m + (1 - optimizerParams.beta1) * param.grad;
+        const v_lookahead = optimizerParams.beta2 * param.v + (1 - optimizerParams.beta2) * (param.grad ** 2);
+        const sqrt_v_lookahead = Math.sqrt(v_lookahead + optimizerParams.eps);
+        const z = -(optimizerParams.lr * m_lookahead) / sqrt_v_lookahead;  
+
+
         // Update m-related elements
-        if (param.m !== undefined) {
-            const m_angle = pos_to_angle(param.m, dialConfig);            
+        if (param.m !== undefined && param.grad !== undefined) {
+            const m_angle = pos_to_angle(param.m, dialConfig);
+            updateArrow(key, param.grad, m_angle, optimizerParams);            
             const outer_m_radius = dialConfig.INNER_RADIUS * 0.70;
 
             // Update m indicator
@@ -762,12 +775,125 @@ const updateParameterDials = (paramState) => {
                 }
             } else if (mBeanGroup) {
                 mBeanGroup.remove();
-            }
+            }            
+        }        
+        updateZShape(key, z);
 
-            
+        if (sqrtVText) {
+            sqrtVText.textContent = sqrt_v_lookahead.toFixed(4);
         }
+
     });
 };
+
+function createArrowPath(centerX, centerY, gradient, maxGradient, mAngle, innerRadius, size) {
+    const arcRadius = innerRadius * 0.76;
+    const start = {
+        x: centerX + arcRadius * Math.cos(mAngle),
+        y: centerY + arcRadius * Math.sin(mAngle)
+    };
+
+    const minLength = Math.PI / 36; // Minimum 5 degrees for visibility
+    const maxLength = Math.PI / 2; // Maximum 90 degrees
+    let gradientLength = Math.max(Math.min(Math.abs(gradient) / maxGradient * maxLength, maxLength), minLength);
+    gradientLength *= Math.sign(gradient);
+
+    const endAngle = mAngle + gradientLength;
+    const end = {
+        x: centerX + arcRadius * Math.cos(endAngle),
+        y: centerY + arcRadius * Math.sin(endAngle)
+    };
+
+    if (gradient === 0) {
+        return null;
+    }
+
+    const baseArrowLength = size / 30;
+    const baseArrowWidth = size / 90;
+    const scaleFactor = 0.5 + 0.5 * Math.min(Math.abs(gradient) / maxGradient, 1);
+    const arrowLength = baseArrowLength * scaleFactor;
+    const arrowWidth = baseArrowWidth * scaleFactor;
+
+    const angle = Math.atan2(end.y - start.y, end.x - start.x);
+    const cosAngle = Math.cos(angle);
+    const sinAngle = Math.sin(angle);
+
+    const arrowhead = [
+        end,
+        {
+            x: end.x - arrowLength * cosAngle + arrowWidth * sinAngle,
+            y: end.y - arrowLength * sinAngle - arrowWidth * cosAngle
+        },
+        {
+            x: end.x - arrowLength * cosAngle - arrowWidth * sinAngle,
+            y: end.y - arrowLength * sinAngle + arrowWidth * cosAngle
+        }
+    ];
+
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("stroke", "blue");
+    path.setAttribute("stroke-width", "2");
+    path.setAttribute("fill", "blue");
+
+    const d = [
+        `M ${start.x} ${start.y}`,
+        `A ${arcRadius} ${arcRadius} 0 0 ${gradient > 0 ? 1 : 0} ${end.x} ${end.y}`,
+        `M ${arrowhead[0].x} ${arrowhead[0].y}`,
+        `L ${arrowhead[1].x} ${arrowhead[1].y}`,
+        `L ${arrowhead[2].x} ${arrowhead[2].y}`,
+        "Z"
+    ].join(" ");
+
+    path.setAttribute("d", d);
+    return path;
+}
+
+function updateArrow(key, gradient, mAngle, optimizerState) {
+    const dial = document.getElementById(key);
+    if (!dial) return;
+
+    const config = JSON.parse(document.getElementById('dial-config').value);
+    const { CENTER, INNER_RADIUS, OUTER_RADIUS, SIZE } = config;
+
+    let arrowGroup = dial.querySelector('[data-id="arrow-group"]');
+    if (!arrowGroup) {
+        arrowGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        arrowGroup.setAttribute("data-id", "arrow-group");
+        dial.appendChild(arrowGroup);
+    }
+
+    // Clear existing arrow
+    while (arrowGroup.firstChild) {
+        arrowGroup.removeChild(arrowGroup.firstChild);
+    }
+
+    const maxGradient = 5.0;
+    const arrowPath = createArrowPath(CENTER, CENTER, gradient, maxGradient, mAngle, INNER_RADIUS, SIZE);
+
+    if (arrowPath) {
+        arrowGroup.appendChild(arrowPath);
+    }
+}
+
+
+function updateZShape(paramName, z) {
+    const zShapeGroup = document.querySelector(`[data-id="${paramName}-z-shape"]`);
+    if (zShapeGroup) {
+        const zShape = zShapeGroup.querySelector('use');
+        const newShapeId = z >= 0 ? "base-z-shape-positive" : "base-z-shape-negative";
+        zShape.setAttribute('href', `#${newShapeId}`);
+        
+        const text = zShapeGroup.querySelector('[data-id="z-value"]');
+        if (text) {
+            const triangle = z >= 0 ? "▲" : "▼";
+            text.textContent = `${triangle} ${Math.abs(z).toFixed(4)}`;
+        } else {
+            console.warn(`Z-value text element not found for ${paramName}`);
+        }
+    } else {
+        console.warn(`Z-shape group not found for ${paramName}`);
+    }
+}
 
 function createMBeanGroup(paramName, m, config) {
     const mBeanGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -1584,6 +1710,7 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
     base_dial = create_base_dial(dial_config)
     base_knob = create_base_knob_path(dial_config)    
     base_m_bean = create_base_m_bean(dial_config)
+    z_shape_positive, z_shape_negative = create_z_shapes(dial_config)
     common_defs = Defs(
         G(base_dial, id="base-dial"),        
         Mask(
@@ -1607,7 +1734,11 @@ def create_main_parameter_dials(visualizer, container_width=800, container_heigh
             base_knob,            
             id="knob-circle-group"
         ), 
-       G(base_m_bean, id="base-m-bean"),       
+       G(base_m_bean, id="base-m-bean"),
+       z_shape_positive, z_shape_negative,
+       create_base_sqrt_v_definitions(dial_config),
+       create_sqrt_v_gradients(),
+       create_sqrt_v_shadow_gradient()       
     )
 
     dial_elements = [
@@ -1709,6 +1840,28 @@ def create_base_m_bean(config):
 
 
     return G(bean_path, text_path)
+
+def create_z_shapes(config: DialConfig):
+    SIZE = config.SIZE
+    INNER_RADIUS = config.INNER_RADIUS
+    rect_width, rect_height = SIZE * 0.4, SIZE * 0.07
+    rect_x = SIZE / 2 - rect_width / 2
+    rect_y = SIZE / 2 + INNER_RADIUS / 2.4
+
+    def create_shape(color):
+        return G(
+            Rect(
+                x=rect_x, y=rect_y,
+                width=rect_width, height=rect_height,
+                rx=rect_height / 2,
+                fill=color, opacity=0.8
+            )
+        )
+
+    return (
+        G(create_shape("#4CAF50"), id="base-z-shape-positive"),
+        G(create_shape("#F44336"), id="base-z-shape-negative")
+    )
 
 def create_outer_dial_gradient_text_path(text_radius, CENTER):
     start = angle_to_coords(math.radians(135), text_radius, CENTER)
@@ -1813,33 +1966,11 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
     SCALE_MIN, SCALE_MAX = config.SCALE_MIN, config.SCALE_MAX
     LINTHRESH = config.LINTHRESH        
          
-    t = optimizer_state['t']
-    
-    # Calculate lookahead values for m and v (without bias correction)
-    m_lookahead = optimizer_state['beta1'] * m + (1 - optimizer_state['beta1']) * gradient
-    v_lookahead = optimizer_state['beta2'] * v + (1 - optimizer_state['beta2']) * (gradient ** 2)
-    sqrt_v_lookahead = math.sqrt(v_lookahead + optimizer_state['eps'])
-    
-    # Calculate the update for visualization (matching the table in the original JavaScript)
-    update_viz = -m_lookahead / sqrt_v_lookahead
-    
-    # Calculate bias-corrected values and actual update (for parameter updates)
-    if t > 0:
-        m_hat = m_lookahead / (1 - optimizer_state['beta1'] ** t)
-        v_hat = v_lookahead / (1 - optimizer_state['beta2'] ** t)
-        update_actual = optimizer_state['lr'] * (m_hat / (math.sqrt(v_hat) + optimizer_state['eps']) + optimizer_state['weight_decay'] * data)
-    else:
-        update_actual = 0
-
-    # Use update_viz for visualization
-    z = update_viz      
-    
     gradient_key = 'negative' if gradient < 0 else 'positive' if gradient > 0 else 'zeroed'
     gradient_id = f"dial-gradient-{gradient_key}"
     percentage = normalize_gradient(gradient, scale_min=SCALE_MIN, scale_max=SCALE_MAX, linthresh=LINTHRESH)
-    rotation_angle = 180 + percentage * 1.8   
-    
-    
+    knob_rotation_angle = 180 + percentage * 1.8   
+        
     outer_m_radius = INNER_RADIUS * 0.70 
     inner_v_radius = outer_m_radius * 0.6 
     m_text_radius = (outer_m_radius + inner_v_radius) * .5
@@ -1895,52 +2026,56 @@ def create_parameter_dial(param_name: str, data: float, gradient: float, m: floa
     max_gradient = 5.0
     blue_arrow = create_arrow_path(CENTER, CENTER, gradient, max_gradient, m_angle, INNER_RADIUS, SIZE)
     
-    sqrt_v_shape = create_sqrt_v_visualization(
-        param_name=param_name,
-        center_x=CENTER,
-        center_y=CENTER,
-        radius=INNER_RADIUS,
-        current_v=sqrt_v_lookahead,        
-        size=SIZE
-    )
+    sqrt_v_width = SIZE * 0.20 
+    sqrt_v_height = SIZE * 0.10
+    sqrt_v_x = CENTER - sqrt_v_width/2
+    sqrt_v_y = CENTER - SIZE/30 
+    cylinder_height = sqrt_v_height * 0.3
 
-    z_color = "#4CAF50" if z > 0 else "#F44336"
-    z_triangle = "▲" if z > 0 else "▼"    
-    rect_width, rect_height = SIZE * 0.4, SIZE * 0.07
-    rect_x = SIZE / 2 - rect_width / 2
-    rect_y = SIZE / 2 + INNER_RADIUS / 2.4
-
-    z_background = Rect(
-        x=rect_x, y=rect_y,
-        width=rect_width, height=rect_height,
-        rx=rect_height / 2,
-        fill=z_color, opacity=0.8
+    sqrt_v_shape = G(                
+        Use(href="#base-sqrt-v-cylinder"),        
+        Text(
+            f"{math.sqrt(v):.4f}",
+            x=CENTER, y=sqrt_v_y + cylinder_height * 0.8,
+            font_family="Arial, sans-serif",
+            font_size=SIZE/25,
+            font_weight="bold",
+            text_anchor="middle",
+            dominant_baseline="central",
+            fill="#FFFFFF",
+            data_id="sqrt-v-value"
+        ),
+        id=f"{param_name}-sqrt-v-visualization"
     )
-
-    z_text = Text(
-        f"{z_triangle} {abs(z):.6f}",
-        x=SIZE/2, y=rect_y + rect_height/2,
-        font_family="Arial, sans-serif", font_size=SIZE/18, font_weight="bold",
-        text_anchor="middle", dominant_baseline="central", fill="white"
-    )
-   
     data_text = Text(
         f"{data:.4f}", x=SIZE/2, y=SIZE/2 + INNER_RADIUS/4,
         font_family="Arial, sans-serif", font_size=SIZE/8, font_weight="bold",
         text_anchor="middle", dominant_baseline="central", fill="black", data_id="data-value"
     )
+
+    z_shape_group = G(
+        Use(href="#base-z-shape-positive"),
+        Text(
+            "▲ 0.0000",
+            x=config.SIZE/2, y=config.SIZE/2 + config.INNER_RADIUS/2.4 + config.SIZE*0.07/2,
+            font_family="Arial, sans-serif", font_size=config.SIZE/18, font_weight="bold",
+            text_anchor="middle", dominant_baseline="central", fill="white",
+            data_id="z-value"
+        ),
+        data_id=f"{param_name}-z-shape"
+    )
     return Svg(        
         Use(href="#gradient-base", fill=f"url(#{gradient_id})", data_gradient_key=gradient_key),
         G(
             Use(href="#knob-circle-group"),
-            transform=f"rotate({rotation_angle} {config.CENTER} {config.CENTER})",
+            transform=f"rotate({knob_rotation_angle} {config.CENTER} {config.CENTER})",
             filter="url(#dropShadow)",
-            data_rotation_angle=rotation_angle
+            data_rotation_angle=knob_rotation_angle
         ),
         G(            
             Use(href="#base-dial"),          
             blue_arrow,
-            data_text, z_background, z_text,                                                      
+            data_text, z_shape_group,                                                     
             m_indicator,
             rotated_m_bean_group,
             sqrt_v_shape, 
@@ -1974,110 +2109,79 @@ def setup_dial_gradients():
             ) for key, colors in gradient_defs.items()
         ]
 
-def create_sqrt_v_visualization(param_name: str, center_x: float, center_y: float, radius: float, 
-                                current_v: float, size: float):    
-    sqrt_v_width = size * 0.20 
-    sqrt_v_height = size * 0.10
-    sqrt_v_x = center_x - sqrt_v_width/2
-    sqrt_v_y = center_y - size/30 
+def create_base_sqrt_v_definitions(config: DialConfig):
+    sqrt_v_width = config.SIZE * 0.20 
+    sqrt_v_height = config.SIZE * 0.10
+    cylinder_height = sqrt_v_height * 0.3
+    sqrt_v_x = config.CENTER - sqrt_v_width/2
+    sqrt_v_y = config.CENTER - config.SIZE/30 
 
-    max_height = sqrt_v_height * 2.5
-    current_height = min(max_height * math.sqrt(current_v) / math.sqrt(3), max_height)
-
-    gradients = create_cylinder_gradients(param_name)
-    
-    cylinder_top = Ellipse(
-        sqrt_v_width/2, sqrt_v_height/2,
-        cx=center_x, cy=sqrt_v_y,
-        fill=f"url(#{param_name}-top-gradient)",
-        stroke="none",
-    )
-    
-    side_effect = (Path(fill=f"url(#{param_name}-side-gradient)", stroke="none")
-        .M(sqrt_v_x, sqrt_v_y)
-        .Q(center_x, sqrt_v_y + current_height * 1.2, sqrt_v_x + sqrt_v_width, sqrt_v_y)
-        .L(sqrt_v_x + sqrt_v_width, sqrt_v_y + current_height)
-        .Q(center_x, sqrt_v_y + current_height * 0.8, sqrt_v_x, sqrt_v_y + current_height)
-        .Z())
-    
-    cylinder_bottom = Ellipse(
-        sqrt_v_width/2, sqrt_v_height/4,
-        cx=center_x, cy=sqrt_v_y + current_height,
-        fill=f"url(#{param_name}-bottom-gradient)",
-        stroke="none",
-    )
-    
-    
-    shadow_height = size * 0.04
-    shadow = Rect(
-        x=sqrt_v_x, 
-        y=sqrt_v_y + current_height,
-        width=sqrt_v_width,
-        height=shadow_height,
-        fill=f"url(#{param_name}-shadow-gradient)",
-        stroke="none",
-    )
-    
-    sqrt_v_text = Text(
-        f"{math.sqrt(current_v):.4f}",
-        x=center_x, y=sqrt_v_y + current_height * 0.8,
-        font_family="Arial, sans-serif",
-        font_size=size/25,
-        font_weight="bold",
-        text_anchor="middle",
-        dominant_baseline="central",
-        fill="#FFFFFF"
+    base_cylinder = G(
+        # Top ellipse
+        Ellipse(
+            sqrt_v_width/2, sqrt_v_height/2,
+            cx=config.CENTER, cy=sqrt_v_y,
+            fill="url(#base-sqrt-v-top-gradient)",
+            stroke="none",
+        ),
+        # Side
+        Path(fill="url(#base-sqrt-v-side-gradient)", stroke="none")
+            .M(sqrt_v_x, sqrt_v_y)
+            .Q(config.CENTER, sqrt_v_y + cylinder_height * 1.2, sqrt_v_x + sqrt_v_width, sqrt_v_y)
+            .L(sqrt_v_x + sqrt_v_width, sqrt_v_y + cylinder_height)
+            .Q(config.CENTER, sqrt_v_y + cylinder_height * 0.8, sqrt_v_x, sqrt_v_y + cylinder_height)
+            .Z(),
+        # Bottom ellipse
+        Ellipse(
+            sqrt_v_width/2, sqrt_v_height/4,
+            cx=config.CENTER, cy=sqrt_v_y + cylinder_height,
+            fill="url(#base-sqrt-v-bottom-gradient)",
+            stroke="none",
+        ),
+         # Shadow
+        Rect(
+            x=sqrt_v_x, 
+            y=sqrt_v_y + cylinder_height,
+            width=sqrt_v_width,
+            height=config.SIZE * 0.04, 
+            fill="url(#base-sqrt-v-shadow-gradient)",
+            stroke="none",
+        ),
+        id="base-sqrt-v-cylinder"
     )
 
+    return base_cylinder
+
+def create_sqrt_v_gradients():
     return G(
-        gradients,
-        create_shadow_gradient(param_name),
-        shadow,
-        side_effect,
-        cylinder_bottom,
-        cylinder_top,
-        sqrt_v_text,
-        id=f"{param_name}-sqrt-v-visualization"
+        RadialGradient(
+            Stop(offset="0%", stop_color="white"),
+            Stop(offset="70%", stop_color="#4a90e2"),
+            Stop(offset="100%", stop_color="#2171cd"),
+            id="base-sqrt-v-top-gradient",
+            cx="50%", cy="50%", r="50%", fx="25%", fy="25%"
+        ),
+        LinearGradient(
+            Stop(offset="0%", stop_color="#4a90e2"),
+            Stop(offset="100%", stop_color="#2171cd"),
+            id="base-sqrt-v-side-gradient",
+            x1="0%", y1="0%", x2="0%", y2="100%"
+        ),
+        RadialGradient(
+            Stop(offset="0%", stop_color="#2171cd"),
+            Stop(offset="100%", stop_color="#4a90e2"),
+            id="base-sqrt-v-bottom-gradient",
+            cx="50%", cy="50%", r="50%", fx="25%", fy="25%"
+        ),
     )
 
-def create_shadow_gradient(param_name: str):
+def create_sqrt_v_shadow_gradient():
     return LinearGradient(
         Stop(offset="0%", stop_color="rgba(0,0,0,0.3)"),
         Stop(offset="100%", stop_color="rgba(0,0,0,0)"),
-        id=f"{param_name}-shadow-gradient",
+        id="base-sqrt-v-shadow-gradient",
         x1="0%", y1="0%", x2="0%", y2="100%"
     )
-
-def create_cylinder_gradients(param_name: str):
-    top_color = "#4a90e2"
-    bottom_color = "#2171cd"
-    
-    top_gradient = RadialGradient(
-        Stop(offset="0%", stop_color="white"),
-        Stop(offset="70%", stop_color=top_color),
-        Stop(offset="100%", stop_color=bottom_color),
-        id=f"{param_name}-top-gradient",
-        cx="50%", cy="50%", r="50%", fx="25%", fy="25%"
-    )
-    
-    side_gradient = LinearGradient(
-        Stop(offset="0%", stop_color=top_color),
-        Stop(offset="100%", stop_color=bottom_color),
-        id=f"{param_name}-side-gradient",
-        x1="0%", y1="0%", x2="0%", y2="100%"
-    )
-    
-    bottom_gradient = RadialGradient(
-        Stop(offset="0%", stop_color=bottom_color),
-        Stop(offset="100%", stop_color=top_color),
-        id=f"{param_name}-bottom-gradient",
-        cx="50%", cy="50%", r="50%", fx="25%", fy="25%"
-    )
-    
-    return G(top_gradient, side_gradient, bottom_gradient)
-
-
-
 
 def FeDropShadow(dx=0, dy=0, stdDeviation=0, flood_color=None, flood_opacity=None, **kwargs):
     attributes = {
@@ -2131,58 +2235,6 @@ def create_bean_shape(center_x, center_y, outer_radius, inner_radius, start_angl
                center_y + outer_radius * math.sin(start_angle))        
         path.Z()
         return path
-
-def create_convex_shape(x, y, width, height):
-    path = Path(fill="#4a90e2", opacity=0.8)       
-    ctrl_offset = height * 1.2       
-    path.M(x, y + height)    
-    path.Q(x + width/2, y + height + ctrl_offset, x + width, y + height)    
-    path.L(x + width, y)        
-    path.Q(x + width/2, y - ctrl_offset, x, y)        
-    path.L(x, y + height)    
-    path.Z()
-    return path
-
-
-def create_sqrtv_shape_with_cutout_text(shape, text, font_size, param_name, text_path_id=None):
-    mask_id = f"sqrtv-mask-{param_name}"
-    
-    if text_path_id:
-        text_element = Text(
-            TextPath(
-                text,
-                href=f"#{text_path_id}",
-                startOffset="50%"
-            ),
-            font_family="Arial, sans-serif",
-            font_size=font_size,
-            font_weight="bold",
-            fill="black",
-            text_anchor="middle",
-            dominant_baseline="central"
-        )
-    else:
-        text_element = Text(
-            text,
-            x=shape.x + shape.width/2,
-            y=shape.y + shape.height/2,
-            font_family="Arial, sans-serif", 
-            font_size=font_size, 
-            font_weight="bold",
-            text_anchor="middle", 
-            dominant_baseline="central", 
-            fill="black"
-        )
-
-    mask = Mask(
-        Rect(x=0, y=0, width="100%", height="100%", fill="white"), 
-        text_element,
-        id=mask_id
-    )
-
-    shape.mask = f"url(#{mask_id})"
-
-    return shape, mask
 
 def create_base_m_bean_definitions(config: DialConfig):
     radii = (config.INNER_RADIUS * 0.70 * factor for factor in (1.15, 0.85))
