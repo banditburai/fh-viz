@@ -9,12 +9,13 @@ import asyncio
 import time
 
 tailwindLink = Link(rel="stylesheet", href="assets/output.css", type="text/css")
+interactLink = Script(src="https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js")
 sselink = Script(src="https://unpkg.com/htmx-ext-sse@2.2.1/sse.js")
 chartlink = Script(src="https://cdn.jsdelivr.net/npm/chart.js")
 svgpanzoomlink = Script(src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js")
 app, rt = fast_app(
     pico=False,    
-    hdrs=(tailwindLink, sselink, chartlink, svgpanzoomlink)
+    hdrs=(tailwindLink, sselink, chartlink, svgpanzoomlink, interactLink)
 )
 
 setup_toasts(app)
@@ -2355,5 +2356,231 @@ async def update_dial(request: Request):
     return create_parameter_dial(param_name="parameter-dial", data=random_data, gradient=gradient, m=m, v=v, optimizer_state=optimizer_state)
 
 
+@rt("/resize")
+def get():
+    return Div(
+        Style("""
+            .grid-container {
+                display: grid;
+                grid-template-columns: 1fr 10px 1fr;
+                grid-template-rows: 1fr 10px 1fr;
+                gap: 0;
+                height: 100vh;
+                width: 100vw;
+            }
+            .resizable {
+                background-color: #f0f0f0;
+                overflow: hidden;
+            }
+            .gutter {
+                background-color: #ddd;
+                transition: background-color 0.3s;
+            }
+            .gutter:hover {
+                background-color: #4299e1;
+            }
+            .gutter-horizontal {
+                cursor: col-resize;
+            }
+            .gutter-vertical {
+                cursor: row-resize;
+            }
+            #container1 { grid-area: 1 / 1 / 2 / 4; }
+            #container2 { grid-area: 3 / 1 / 4 / 2; }
+            #container3 { grid-area: 3 / 3 / 4 / 4; }
+            #gutter-horizontal { grid-area: 3 / 2 / 4 / 3; }
+            #gutter-vertical { grid-area: 2 / 1 / 3 / 4; }
+        """),
+        Div(
+            Div(create_attribute_animation_svg(), id="container1", cls="resizable"),
+            Div(id="gutter-vertical", cls="gutter gutter-vertical"),
+            Div(create_transform_animation_svg(), id="container2", cls="resizable"),
+            Div(id="gutter-horizontal", cls="gutter gutter-horizontal"),
+            Div(create_motion_animation_svg(), id="container3", cls="resizable"),
+            cls="grid-container"
+        ),
+        Script("""
+        let gridState = {
+            rows: ['1fr', '10px', '1fr'],
+            columns: ['1fr', '10px', '1fr']
+        };
+
+        function setupResize() {
+            const grid = document.querySelector('.grid-container');
+            const gutterVertical = document.getElementById('gutter-vertical');
+            const gutterHorizontal = document.getElementById('gutter-horizontal');
+
+            interact('.gutter-vertical').draggable({
+                axis: 'y',
+                listeners: {
+                    move(event) {
+                        const gridRect = grid.getBoundingClientRect();
+                        const newTopHeight = event.clientY - gridRect.top;
+                        const newBottomHeight = gridRect.height - newTopHeight - gutterVertical.offsetHeight;
+                        
+                        gridState.rows = [`${newTopHeight}px`, '10px', `${newBottomHeight}px`];
+                        updateGridTemplate();
+                    }
+                }
+            });
+
+            interact('.gutter-horizontal').draggable({
+                axis: 'x',
+                listeners: {
+                    move(event) {
+                        const gridRect = grid.getBoundingClientRect();
+                        const newLeftWidth = event.clientX - gridRect.left;
+                        const newRightWidth = gridRect.width - newLeftWidth - gutterHorizontal.offsetWidth;
+                        
+                        gridState.columns = [`${newLeftWidth}px`, '10px', `${newRightWidth}px`];
+                        updateGridTemplate();
+                    }
+                }
+            });
+        }
+
+        function updateGridTemplate() {
+            const grid = document.querySelector('.grid-container');
+            grid.style.gridTemplateRows = gridState.rows.join(' ');
+            grid.style.gridTemplateColumns = gridState.columns.join(' ');
+            resizeAllContainers();
+        }
+
+        function resizeAllContainers() {
+            ['container1', 'container2', 'container3'].forEach(id => {
+                const container = document.getElementById(id);
+                resizeSvgContainer(id, container.clientWidth, container.clientHeight);
+            });
+        }
+
+        function resizeSvgContainer(containerId, width, height) {
+            const container = document.getElementById(containerId);
+            const svg = container.querySelector('svg');
+            if (svg) {
+                // Update SVG size
+                svg.setAttribute('width', '100%');
+                svg.setAttribute('height', '100%');
+                
+                // Update viewBox to maintain aspect ratio
+                const viewBox = svg.viewBox.baseVal;
+                const aspectRatio = viewBox.width / viewBox.height;
+                
+                if (width / height > aspectRatio) {
+                    viewBox.width = height * aspectRatio;
+                    viewBox.height = height;
+                } else {
+                    viewBox.width = width;
+                    viewBox.height = width / aspectRatio;
+                }
+                
+                svg.setAttribute('viewBox', `0 0 ${viewBox.width} ${viewBox.height}`);
+                svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+            }
+        }
+
+        function handleWindowResize() {
+            const grid = document.querySelector('.grid-container');
+            const gutterVertical = document.getElementById('gutter-vertical');
+            const gutterHorizontal = document.getElementById('gutter-horizontal');
+
+            // Reset to default layout if any dimension is in pixels
+            if (gridState.rows.some(r => r.endsWith('px')) || gridState.columns.some(c => c.endsWith('px'))) {
+                gridState.rows = ['1fr', '10px', '1fr'];
+                gridState.columns = ['1fr', '10px', '1fr'];
+            }
+
+            updateGridTemplate();
+        }
+
+        setupResize();
+        handleWindowResize(); // Initial call to set up the layout
+        window.addEventListener('resize', handleWindowResize);
+        document.body.addEventListener('htmx:afterSwap', () => {
+            setupResize();
+            handleWindowResize();
+        });
+        """)
+    )
+
+def create_attribute_animation_svg():
+    animate = Animate(
+        attributeName="cx",
+        from_="0",
+        to="100%",
+        dur="5s",
+        repeatCount="indefinite"
+    )
+    circle = Circle(
+        15, 0, 50,  # r, cx, cy
+        fill="blue",
+        stroke="black",
+        stroke_width=1,
+    )
+    animated_circle = circle(*[animate])
+    
+    return Svg(
+        Title("Attribute Animation with SMIL"),
+        Rect(width="100%", height="100%", x=0, y=0, stroke="black", stroke_width=1),
+        animated_circle,
+        width="100%", height="100%",
+        viewBox="0 0 300 100",
+        preserveAspectRatio="xMidYMid meet"
+    )
+
+def create_transform_animation_svg():
+    animate_transform = AnimateTransform(
+        attributeName="transform",
+        begin="0s",
+        dur="20s",
+        type="rotate",
+        from_="0 50 50",
+        to="360 50 50",
+        repeatCount="indefinite"
+    )
+    
+    rect = Rect(
+        width=30, height=30, x=35, y=35,
+        fill="blue",
+        stroke="black",
+        stroke_width=1,
+    )
+    
+    animated_rect = rect(*[animate_transform])
+    
+    return Svg(
+        Title("SVG SMIL Animate with transform"),
+        Rect(width="100%", height="100%", x=0, y=0, stroke="black", stroke_width=1),
+        animated_rect,
+        width="100%", height="100%",
+        viewBox="0 0 100 100",
+        preserveAspectRatio="xMidYMid meet"
+    )
+
+def create_motion_animation_svg():
+    animate_motion = AnimateMotion(
+        path="M 20,50 C 20,20 80,20 80,50 C 80,80 20,80 20,50 Z",
+        dur="5s",
+        repeatCount="indefinite",
+        rotate="auto"
+    )
+    
+    rect = Rect(
+        width=20, height=20, x=-10, y=-10,
+        fill="blue",
+        stroke="black",
+        stroke_width=1,
+    )
+    
+    animated_rect = rect(*[animate_motion])
+    
+    return Svg(
+        Title("SVG SMIL Animate with Path - Curved Motion"),
+        Rect(width="100%", height="100%", x=0, y=0, stroke="black", stroke_width=1),
+        animated_rect,
+        width="100%", height="100%",
+        viewBox="0 0 100 100",
+        preserveAspectRatio="xMidYMid meet"
+    )
+    
 # Run the app
 serve()
